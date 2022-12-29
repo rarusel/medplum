@@ -5,20 +5,71 @@
 # You can start all services by running "docker-compose up"
 version: '3.7'
 services:
-  postgres:
-    image: postgres:12
-    restart: always
+
+  app: 
+    container_name: medplum-app
+    build: 
+      context: ./
+      dockerfile: ./packages/app/Dockerfile
+    depends_on:
+      - server
+    environment: 
+      - MEDPLUM_BASE_URL=http://${MEDPLUM_HOST}:${MEDPLUM_PORT}/
+    networks:
+      - medplum_network
+    ports: 
+      - 3482:3000
+    restart: unless-stopped 
+
+  server:
+    container_name: medplum-server
+    build: 
+      context: ./
+      dockerfile: ./Dockerfile
+    depends_on:
+      - postgres
+      - redis
     environment:
-      - POSTGRES_USER=medplum
-      - POSTGRES_PASSWORD=medplum
+      - POSTGRES_HOST
+      - POSTGRES_PORT
+      - POSTMARK_API_TOKEN
+    hostname: ${MEDPLUM_HOST}
+    networks: 
+      - medplum_network
+    ports:
+      - 8103:${MEDPLUM_PORT}
+    restart: unless-stopped
+    volumes: 
+      - ./packages/:/usr/src/medplum/packages/
+
+  postgres:
+    container_name: medplum-postgres
+    image: postgres:12
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
     volumes:
       - ./postgres/postgres.conf:/usr/local/etc/postgres/postgres.conf
       - ./postgres/:/docker-entrypoint-initdb.d/
+      - ../postgres/data/:/var/lib/postgresql/data/
     command: postgres -c config_file=/usr/local/etc/postgres/postgres.conf
     ports:
-      - '5432:5432'
+      - 5432:${POSTGRES_PORT}
+    networks:
+      - medplum_network
+    hostname: ${POSTGRES_HOST}
+
   redis:
+    container_name: medplum-redis
     image: redis:6
-    command: redis-server --requirepass medplum
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+    hostname: ${REDIS_HOST}
     ports:
-      - '6379:6379'
+      - 6379:${REDIS_PORT}
+    networks:
+      - medplum_network
+
+networks: 
+  medplum_network: 
+    name: medplum_network
