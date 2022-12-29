@@ -17,7 +17,7 @@ export const newUserValidators = [
   body('lastName').notEmpty().withMessage('Last name is required'),
   body('email').isEmail().withMessage('Valid email address is required'),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-  body('recaptchaToken').notEmpty().withMessage('Recaptcha token is required'),
+  // body('recaptchaToken').notEmpty().withMessage('Recaptcha token is required'),
 ];
 
 /**
@@ -36,29 +36,31 @@ export async function newUserHandler(req: Request, res: Response): Promise<void>
   let secretKey: string | undefined = getConfig().recaptchaSecretKey;
   let project: Project | undefined;
 
-  if (recaptchaSiteKey && recaptchaSiteKey !== getConfig().recaptchaSiteKey) {
-    // If the recaptcha site key is not the main Medplum recaptcha site key,
-    // then it must be associated with a Project.
-    // The user can only authenticate with that project.
-    project = await getProjectByRecaptchaSiteKey(recaptchaSiteKey);
-    if (!project) {
-      sendOutcome(res, badRequest('Invalid recaptchaSiteKey'));
-      return;
+  if (recaptchaSiteKey || getConfig().recaptchaSiteKey) {
+    if (recaptchaSiteKey && recaptchaSiteKey !== getConfig().recaptchaSiteKey) {
+      // If the recaptcha site key is not the main Medplum recaptcha site key,
+      // then it must be associated with a Project.
+      // The user can only authenticate with that project.
+      project = await getProjectByRecaptchaSiteKey(recaptchaSiteKey);
+      if (!project) {
+        sendOutcome(res, badRequest('Invalid recaptchaSiteKey'));
+        return;
+      }
+      secretKey = project.site?.find((s) => s.recaptchaSiteKey === recaptchaSiteKey)?.recaptchaSecretKey;
+      if (!secretKey) {
+        sendOutcome(res, badRequest('Invalid recaptchaSecretKey'));
+        return;
+      }
+      if (!project.defaultPatientAccessPolicy) {
+        sendOutcome(res, badRequest('Project does not allow open registration'));
+        return;
+      }
     }
-    secretKey = project.site?.find((s) => s.recaptchaSiteKey === recaptchaSiteKey)?.recaptchaSecretKey;
-    if (!secretKey) {
-      sendOutcome(res, badRequest('Invalid recaptchaSecretKey'));
-      return;
-    }
-    if (!project.defaultPatientAccessPolicy) {
-      sendOutcome(res, badRequest('Project does not allow open registration'));
-      return;
-    }
-  }
 
-  if (!(await verifyRecaptcha(secretKey as string, req.body.recaptchaToken))) {
-    sendOutcome(res, badRequest('Recaptcha failed'));
-    return;
+    if (!(await verifyRecaptcha(secretKey as string, req.body.recaptchaToken))) {
+      sendOutcome(res, badRequest('Recaptcha failed'));
+      return;
+    }
   }
 
   // If the user is a practitioner, then projectId should be undefined

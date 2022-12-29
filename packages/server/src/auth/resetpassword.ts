@@ -11,7 +11,7 @@ import { verifyRecaptcha } from './utils';
 
 export const resetPasswordValidators = [
   body('email').isEmail().withMessage('Valid email address is required'),
-  body('recaptchaToken').notEmpty().withMessage('Recaptcha token is required'),
+  // body('recaptchaToken').notEmpty().withMessage('Recaptcha token is required'),
 ];
 
 export async function resetPasswordHandler(req: Request, res: Response): Promise<void> {
@@ -21,9 +21,11 @@ export async function resetPasswordHandler(req: Request, res: Response): Promise
     return;
   }
 
-  if (!(await verifyRecaptcha(getConfig().recaptchaSecretKey as string, req.body.recaptchaToken))) {
-    sendOutcome(res, badRequest('Recaptcha failed'));
-    return;
+  if (getConfig().recaptchaSecretKey) {
+    if (!(await verifyRecaptcha(getConfig().recaptchaSecretKey as string, req.body.recaptchaToken))) {
+      sendOutcome(res, badRequest('Recaptcha failed'));
+      return;
+    }
   }
 
   const existingBundle = await systemRepo.search<User>({

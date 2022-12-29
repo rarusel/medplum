@@ -24,7 +24,7 @@ import { getRecaptcha, initRecaptcha } from '../utils/recaptcha';
 export interface NewUserFormProps {
   readonly projectId: string;
   readonly googleClientId?: string;
-  readonly recaptchaSiteKey: string;
+  readonly recaptchaSiteKey?: string;
   readonly children?: React.ReactNode;
   readonly handleAuthResponse: (response: LoginAuthenticationResponse) => void;
 }
@@ -36,14 +36,19 @@ export function NewUserForm(props: NewUserFormProps): JSX.Element {
   const [outcome, setOutcome] = useState<OperationOutcome>();
   const issues = getIssuesForExpression(outcome, undefined);
 
-  useEffect(() => initRecaptcha(recaptchaSiteKey), [recaptchaSiteKey]);
+  if (recaptchaSiteKey) {
+    useEffect(() => initRecaptcha(recaptchaSiteKey), [recaptchaSiteKey]);
+  }
 
   return (
     <Form
       style={{ maxWidth: 400 }}
       onSubmit={async (formData: Record<string, string>) => {
         try {
-          const recaptchaToken = await getRecaptcha(recaptchaSiteKey);
+          let recaptchaToken; 
+          if (recaptchaSiteKey) {
+            recaptchaToken = await getRecaptcha(recaptchaSiteKey);
+          }
           props.handleAuthResponse(
             await medplum.startNewUser({
               projectId: props.projectId,
@@ -128,18 +133,20 @@ export function NewUserForm(props: NewUserFormProps): JSX.Element {
           required={true}
           error={getErrorsForInput(outcome, 'password')}
         />
-        <Text color="dimmed" size="xs">
+        {/* <Text color="dimmed" size="xs">
           By clicking submit you agree to the Medplum{' '}
           <Anchor href="https://www.medplum.com/privacy">Privacy&nbsp;Policy</Anchor>
           {' and '}
           <Anchor href="https://www.medplum.com/terms">Terms&nbsp;of&nbsp;Service</Anchor>.
-        </Text>
-        <Text color="dimmed" size="xs">
-          This site is protected by reCAPTCHA and the Google{' '}
-          <Anchor href="https://policies.google.com/privacy">Privacy&nbsp;Policy</Anchor>
-          {' and '}
-          <Anchor href="https://policies.google.com/terms">Terms&nbsp;of&nbsp;Service</Anchor> apply.
-        </Text>
+        </Text> */}
+        {recaptchaSiteKey && (
+          <Text color="dimmed" size="xs">
+            This site is protected by reCAPTCHA and the Google{' '}
+            <Anchor href="https://policies.google.com/privacy">Privacy&nbsp;Policy</Anchor>
+            {' and '}
+            <Anchor href="https://policies.google.com/terms">Terms&nbsp;of&nbsp;Service</Anchor> apply.
+          </Text>
+        )}
       </Stack>
       <Group position="apart" mt="xl" noWrap>
         <Checkbox name="remember" label="Remember me" size="xs" />

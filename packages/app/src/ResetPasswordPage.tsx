@@ -12,19 +12,27 @@ export function ResetPasswordPage(): JSX.Element {
   const [outcome, setOutcome] = useState<OperationOutcome>();
   const [success, setSuccess] = useState(false);
 
-  useEffect(() => {
-    initRecaptcha(recaptchaSiteKey);
-  }, []);
+  if (recaptchaSiteKey) {
+    useEffect(() => {
+      initRecaptcha(recaptchaSiteKey);
+    }, []);
+  }
 
   return (
     <Document width={450}>
       <Form
         style={{ maxWidth: 400 }}
         onSubmit={(formData: Record<string, string>) => {
-          getRecaptcha(recaptchaSiteKey)
-            .then((recaptchaToken: string) => medplum.post('auth/resetpassword', { ...formData, recaptchaToken }))
-            .then(() => setSuccess(true))
-            .catch(setOutcome);
+          if (recaptchaSiteKey) {
+            getRecaptcha(recaptchaSiteKey)
+              .then((recaptchaToken: string) => medplum.post('auth/resetpassword', { ...formData, recaptchaToken }))
+              .then(() => setSuccess(true))
+              .catch(setOutcome);
+          } else {
+            medplum.post('auth/resetpassword', { ...formData })
+              .then(() => setSuccess(true))
+              .catch(setOutcome);
+          }
         }}
       >
         <Stack spacing="lg" mb="xl" align="center">

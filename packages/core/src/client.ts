@@ -212,7 +212,7 @@ export interface NewUserRequest {
   readonly lastName: string;
   readonly email: string;
   readonly password: string;
-  readonly recaptchaToken: string;
+  readonly recaptchaToken?: string;
   readonly recaptchaSiteKey?: string;
   readonly remember?: boolean;
   readonly projectId?: string;
