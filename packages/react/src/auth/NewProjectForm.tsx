@@ -1,4 +1,5 @@
-import { Anchor, Button, Center, Group, Stack, Text, TextInput, Title } from '@mantine/core';
+// import { Anchor, Button, Center, Group, Stack, Text, TextInput, Title } from '@mantine/core';
+import { Button, Center, Group, Stack, TextInput, Title } from '@mantine/core';
 import { LoginAuthenticationResponse } from '@medplum/core';
 import { OperationOutcome } from '@medplum/fhirtypes';
 import React, { useState } from 'react';
@@ -44,12 +45,14 @@ export function NewProjectForm(props: NewProjectFormProps): JSX.Element {
           autoFocus={true}
           error={getErrorsForInput(outcome, 'firstName')}
         />
+{/* 
         <Text color="dimmed" size="xs">
           By clicking submit you agree to the Medplum{' '}
           <Anchor href="https://www.medplum.com/privacy">Privacy&nbsp;Policy</Anchor>
           {' and '}
           <Anchor href="https://www.medplum.com/terms">Terms&nbsp;of&nbsp;Service</Anchor>.
         </Text>
+*/}
       </Stack>
       <Group position="right" mt="xl" noWrap>
         <Button type="submit">Create project</Button>
