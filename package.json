@@ -74,7 +74,9 @@
     "parserOptions": {
       "project": "./tsconfig.base.json"
     },
-    "plugins": ["@typescript-eslint"],
+    "plugins": [
+      "@typescript-eslint"
+    ],
     "extends": [
       "eslint:recommended",
       "plugin:@typescript-eslint/recommended",
@@ -98,7 +100,10 @@
           "varsIgnorePattern": "^_"
         }
       ],
-      "eqeqeq": ["error", "always"],
+      "eqeqeq": [
+        "error",
+        "always"
+      ],
       "prefer-promise-reject-errors": "error"
     },
     "ignorePatterns": [
@@ -114,5 +119,9 @@
       "rollup.config.mjs",
       "webpack.config.js"
     ]
+  },
+  "dependencies": {
+    "fast-json-patch": "^3.1.1",
+    "nodemailer": "^6.9.1"
   }
 }
