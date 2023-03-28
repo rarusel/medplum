@@ -2,12 +2,14 @@ import {
   Bundle,
   BundleEntry,
   ElementDefinition,
+  Reference,
   Resource,
+  ResourceType,
   SearchParameter,
   StructureDefinition,
 } from '@medplum/fhirtypes';
 import baseSchema from './base-schema.json';
-import { SearchParameterDetails } from './searchparams';
+import { SearchParameterDetails } from './search/details';
 import { capitalize } from './utils';
 
 export interface TypedValue {
@@ -131,29 +133,6 @@ export interface TypeSchema {
 }
 
 /**
- * Creates a new empty IndexedStructureDefinition.
- * @returns The empty IndexedStructureDefinition.
- * @deprecated Use globalSchema
- */
-export function createSchema(): IndexedStructureDefinition {
-  return { types: {} };
-}
-
-function createTypeSchema(
-  typeName: string,
-  structureDefinition: StructureDefinition,
-  elementDefinition: ElementDefinition
-): TypeSchema {
-  return {
-    structureDefinition,
-    elementDefinition,
-    display: typeName,
-    description: elementDefinition.definition,
-    properties: {},
-  };
-}
-
-/**
  * Indexes a bundle of StructureDefinitions for faster lookup.
  * @param bundle A FHIR bundle StructureDefinition resources.
  * @see {@link IndexedStructureDefinition} for more details on indexed StructureDefinitions.
@@ -184,7 +163,7 @@ export function indexStructureDefinition(structureDefinition: StructureDefinitio
     elements.forEach((element) => indexType(structureDefinition, element));
 
     // Second pass, build properties
-    elements.forEach((element) => indexProperty(element));
+    elements.forEach((element) => indexProperty(structureDefinition, element));
   }
 }
 
@@ -202,10 +181,26 @@ function indexType(structureDefinition: StructureDefinition, elementDefinition: 
   if (typeCode !== undefined && typeCode !== 'Element' && typeCode !== 'BackboneElement') {
     return;
   }
+
   const parts = path.split('.');
+
+  // Force the first part to be the type name
+  // This is necessary for "SimpleQuantity" and "MoneyQuantity"
+  parts[0] = structureDefinition.name as string;
+
   const typeName = buildTypeName(parts);
-  globalSchema.types[typeName] = createTypeSchema(typeName, structureDefinition, elementDefinition);
-  globalSchema.types[typeName].parentType = buildTypeName(parts.slice(0, parts.length - 1));
+  let typeSchema = globalSchema.types[typeName];
+
+  if (!typeSchema) {
+    globalSchema.types[typeName] = typeSchema = {} as TypeSchema;
+  }
+
+  typeSchema.parentType = typeSchema.parentType || buildTypeName(parts.slice(0, parts.length - 1));
+  typeSchema.display = typeSchema.display || typeName;
+  typeSchema.structureDefinition = typeSchema.structureDefinition || structureDefinition;
+  typeSchema.elementDefinition = typeSchema.elementDefinition || elementDefinition;
+  typeSchema.description = typeSchema.description || elementDefinition.definition;
+  typeSchema.properties = typeSchema.properties || {};
 }
 
 /**
@@ -213,12 +208,17 @@ function indexType(structureDefinition: StructureDefinition, elementDefinition: 
  * @param element The input ElementDefinition.
  * @see {@link IndexedStructureDefinition} for more details on indexed StructureDefinitions.
  */
-function indexProperty(element: ElementDefinition): void {
+function indexProperty(structureDefinition: StructureDefinition, element: ElementDefinition): void {
   const path = element.path as string;
   const parts = path.split('.');
   if (parts.length === 1) {
     return;
   }
+
+  // Force the first part to be the type name
+  // This is necessary for "SimpleQuantity" and "MoneyQuantity"
+  parts[0] = structureDefinition.name as string;
+
   const typeName = buildTypeName(parts.slice(0, parts.length - 1));
   const typeSchema = globalSchema.types[typeName];
   if (!typeSchema) {
@@ -279,11 +279,47 @@ export function indexSearchParameter(searchParam: SearchParameter): void {
           type: 'reference',
           expression: resourceType + '.meta.compartment',
         } as SearchParameter,
+        _profile: {
+          base: [resourceType],
+          code: '_profile',
+          type: 'uri',
+          expression: resourceType + '.meta.profile',
+        } as SearchParameter,
+        _security: {
+          base: [resourceType],
+          code: '_security',
+          type: 'token',
+          expression: resourceType + '.meta.security',
+        } as SearchParameter,
+        _source: {
+          base: [resourceType],
+          code: '_source',
+          type: 'uri',
+          expression: resourceType + '.meta.source',
+        } as SearchParameter,
+        _tag: {
+          base: [resourceType],
+          code: '_tag',
+          type: 'token',
+          expression: resourceType + '.meta.tag',
+        } as SearchParameter,
       };
     }
 
     typeSchema.searchParams[searchParam.code as string] = searchParam;
   }
+}
+
+/**
+ * Returns the type name for an ElementDefinition.
+ * @param elementDefinition The element definition.
+ * @returns The Medplum type name.
+ */
+export function getElementDefinitionTypeName(elementDefinition: ElementDefinition): string {
+  const code = elementDefinition.type?.[0]?.code as string;
+  return code === 'BackboneElement' || code === 'Element'
+    ? buildTypeName(elementDefinition.path?.split('.') as string[])
+    : code;
 }
 
 export function buildTypeName(components: string[]): string {
@@ -293,16 +329,64 @@ export function buildTypeName(components: string[]): string {
   return components.map(capitalize).join('');
 }
 
+/**
+ * Returns true if the type schema is a non-abstract FHIR resource.
+ * @param typeSchema The type schema to check.
+ * @returns True if the type schema is a non-abstract FHIR resource.
+ */
+export function isResourceTypeSchema(typeSchema: TypeSchema): boolean {
+  const structureDefinition = typeSchema.structureDefinition;
+  return (
+    structureDefinition &&
+    structureDefinition.name === typeSchema.elementDefinition?.path &&
+    structureDefinition.kind === 'resource' &&
+    !structureDefinition.abstract
+  );
+}
+
+/**
+ * Returns an array of all resource types.
+ * Note that this is based on globalSchema, and will only return resource types that are currently in memory.
+ * @returns An array of all resource types.
+ */
+export function getResourceTypes(): ResourceType[] {
+  const result: ResourceType[] = [];
+  for (const [resourceType, typeSchema] of Object.entries(globalSchema.types)) {
+    if (isResourceTypeSchema(typeSchema)) {
+      result.push(resourceType as ResourceType);
+    }
+  }
+  return result;
+}
+
+/**
+ * Returns the type schema for the resource type.
+ * @param resourceType The resource type.
+ * @returns The type schema for the resource type.
+ */
+export function getResourceTypeSchema(resourceType: string): TypeSchema {
+  return globalSchema.types[resourceType];
+}
+
+/**
+ * Returns the search parameters for the resource type indexed by search code.
+ * @param resourceType The resource type.
+ * @returns The search parameters for the resource type indexed by search code.
+ */
+export function getSearchParameters(resourceType: string): Record<string, SearchParameter> | undefined {
+  return globalSchema.types[resourceType].searchParams;
+}
+
+/**
+ * Returns a human friendly display name for a FHIR element definition path.
+ * @param path The FHIR element definition path.
+ * @returns The best guess of the display name.
+ */
 export function getPropertyDisplayName(path: string): string {
   // Get the property name, which is the remainder after the last period
   // For example, for path "Patient.birthDate"
   // the property name is "birthDate"
   const propertyName = path.replaceAll('[x]', '').split('.').pop() as string;
-
-  // Special case for ID
-  if (propertyName === 'id') {
-    return 'ID';
-  }
 
   // Split by capital letters
   // Capitalize the first letter of each word
@@ -312,10 +396,20 @@ export function getPropertyDisplayName(path: string): string {
   // the display name is "Birth Date".
   return propertyName
     .split(/(?=[A-Z])/)
-    .map(capitalize)
+    .map(capitalizeDisplayWord)
     .join(' ')
     .replace('_', ' ')
     .replace(/\s+/g, ' ');
+}
+
+const capitalizedWords = new Set(['ID', 'PKCE', 'JWKS', 'URI', 'URL']);
+
+function capitalizeDisplayWord(word: string): string {
+  const upper = word.toUpperCase();
+  if (capitalizedWords.has(upper)) {
+    return upper;
+  }
+  return upper.charAt(0) + word.slice(1);
 }
 
 /**
@@ -346,6 +440,28 @@ export function getElementDefinition(typeName: string, propertyName: string): El
   }
 
   return property;
+}
+
+/**
+ * Typeguard to validate that an object is a FHIR resource
+ * @param value The object to check
+ * @returns True if the input is of type 'object' and contains property 'resourceType'
+ */
+export function isResource<T extends Resource = Resource>(
+  value: T | Reference<T> | string | undefined | null
+): value is T {
+  return !!(value && typeof value === 'object' && 'resourceType' in value);
+}
+
+/**
+ * Typeguard to validate that an object is a FHIR resource
+ * @param value The object to check
+ * @returns True if the input is of type 'object' and contains property 'reference'
+ */
+export function isReference<T extends Resource>(
+  value: T | Reference<T> | string | undefined | null
+): value is Reference<T> & { reference: string } {
+  return !!(value && typeof value === 'object' && 'reference' in value);
 }
 
 /**

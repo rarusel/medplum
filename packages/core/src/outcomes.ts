@@ -137,6 +137,25 @@ export function badRequest(details: string, expression?: string): OperationOutco
   };
 }
 
+export function validationError(details: string): OperationOutcome {
+  return {
+    resourceType: 'OperationOutcome',
+    issue: [
+      {
+        severity: 'error',
+        code: 'structure',
+        details: {
+          text: details,
+        },
+      },
+    ],
+  };
+}
+
+export function isOperationOutcome(value: unknown): value is OperationOutcome {
+  return typeof value === 'object' && value !== null && (value as any).resourceType === 'OperationOutcome';
+}
+
 export function isOk(outcome: OperationOutcome): boolean {
   return outcome.id === OK_ID || outcome.id === CREATED_ID || outcome.id === NOT_MODIFIED_ID;
 }
@@ -185,10 +204,26 @@ export function assertOk<T>(outcome: OperationOutcome, resource: T | undefined):
 export class OperationOutcomeError extends Error {
   readonly outcome: OperationOutcome;
 
-  constructor(outcome: OperationOutcome) {
-    super(outcome?.issue?.[0].details?.text);
+  constructor(outcome: OperationOutcome, cause?: unknown) {
+    super(operationOutcomeToString(outcome));
     this.outcome = outcome;
+    this.cause = cause;
   }
+}
+
+/**
+ * Normalizes an error object into an OperationOutcome.
+ * @param error The error value which could be a string, Error, OperationOutcome, or other unknown type.
+ * @returns The normalized OperationOutcome.
+ */
+export function normalizeOperationOutcome(error: unknown): OperationOutcome {
+  if (error instanceof OperationOutcomeError) {
+    return error.outcome;
+  }
+  if (isOperationOutcome(error)) {
+    return error;
+  }
+  return badRequest(normalizeErrorString(error));
 }
 
 /**
@@ -206,9 +241,27 @@ export function normalizeErrorString(error: unknown): string {
   if (error instanceof Error) {
     return error.message;
   }
-  if (typeof error === 'object' && 'resourceType' in error) {
-    const outcome = error as OperationOutcome;
-    return outcome.issue?.[0]?.details?.text ?? 'Unknown error';
+  if (isOperationOutcome(error)) {
+    return operationOutcomeToString(error);
   }
   return JSON.stringify(error);
+}
+
+/**
+ * Returns a string represenation of the operation outcome.
+ * @param outcome The operation outcome.
+ * @returns The string representation of the operation outcome.
+ */
+export function operationOutcomeToString(outcome: OperationOutcome): string {
+  const strs = [];
+  if (outcome.issue) {
+    for (const issue of outcome.issue) {
+      let issueStr = issue.details?.text || 'Unknown error';
+      if (issue.expression?.length) {
+        issueStr += ` (${issue.expression.join(', ')})`;
+      }
+      strs.push(issueStr);
+    }
+  }
+  return strs.length > 0 ? strs.join('; ') : 'Unknown error';
 }

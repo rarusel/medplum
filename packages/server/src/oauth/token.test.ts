@@ -1,5 +1,5 @@
-import { parseSearchDefinition } from '@medplum/core';
-import { ClientApplication, Login, Project, SmartAppLaunch } from '@medplum/fhirtypes';
+import { createReference, parseJWTPayload, parseSearchDefinition } from '@medplum/core';
+import { AccessPolicy, ClientApplication, Login, Project, SmartAppLaunch } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import express from 'express';
 import { generateKeyPair, SignJWT } from 'jose';
@@ -35,6 +35,7 @@ const password = randomUUID();
 let config: MedplumServerConfig;
 let project: Project;
 let client: ClientApplication;
+let pkceOptionalClient: ClientApplication;
 
 describe('OAuth2 Token', () => {
   beforeAll(async () => {
@@ -44,13 +45,35 @@ describe('OAuth2 Token', () => {
     // Create a test project
     ({ project, client } = await createTestProject());
 
+    // Create a 2nd client with PKCE optional
+    pkceOptionalClient = await systemRepo.createResource<ClientApplication>({
+      resourceType: 'ClientApplication',
+      pkceOptional: true,
+    });
+
+    // Create access policy
+    const accessPolicy = await systemRepo.createResource<AccessPolicy>({
+      resourceType: 'AccessPolicy',
+      resource: [{ resourceType: '*' }],
+      ipAccessRule: [
+        { name: 'Block test', value: '6.6.6.6', action: 'block' },
+        { name: 'Allow by default', value: '*', action: 'allow' },
+      ],
+    });
+
     // Create a test user
-    const { user } = await inviteUser({
+    const { user, membership } = await inviteUser({
       project,
       resourceType: 'Practitioner',
       firstName: 'Test',
       lastName: 'User',
       email,
+    });
+
+    // Set the access policy
+    await systemRepo.updateResource({
+      ...membership,
+      accessPolicy: createReference(accessPolicy),
     });
 
     // Set the test user password
@@ -203,6 +226,24 @@ describe('OAuth2 Token', () => {
     expect(res.body.error_description).toBe('Invalid client');
   });
 
+  test('Token for client in super admin', async () => {
+    const { client } = await createTestProject({ superAdmin: true });
+    const res1 = await request(app).post('/oauth2/token').type('form').send({
+      grant_type: 'client_credentials',
+      client_id: client.id,
+      client_secret: client.secret,
+    });
+    expect(res1.status).toBe(200);
+    expect(res1.body.error).toBeUndefined();
+    expect(res1.body.access_token).toBeDefined();
+
+    // Expect login to be a super admin login
+    const claims = parseJWTPayload(res1.body.access_token);
+    expect(claims.login_id).toBeDefined();
+    const login = await systemRepo.readResource<Login>('Login', claims.login_id as string);
+    expect(login.superAdmin).toBe(true);
+  });
+
   test('Token for authorization_code with missing code', async () => {
     const res = await request(app).post('/oauth2/token').type('form').send({
       grant_type: 'authorization_code',
@@ -296,6 +337,36 @@ describe('OAuth2 Token', () => {
       code: res.body.code,
       code_verifier: 'xyz',
     });
+    expect(res2.status).toBe(200);
+    expect(res2.body.token_type).toBe('Bearer');
+    expect(res2.body.scope).toBe('openid');
+    expect(res2.body.expires_in).toBe(3600);
+    expect(res2.body.id_token).toBeDefined();
+    expect(res2.body.access_token).toBeDefined();
+    expect(res2.body.refresh_token).toBeUndefined();
+  });
+
+  test('Authorization code token with code challenge and PKCE optional', async () => {
+    const res = await request(app)
+      .post('/auth/login')
+      .type('json')
+      .send({
+        clientId: pkceOptionalClient.id as string,
+        email,
+        password,
+        codeChallenge: 'xyz',
+        codeChallengeMethod: 'plain',
+      });
+    expect(res.status).toBe(200);
+
+    const res2 = await request(app)
+      .post('/oauth2/token')
+      .type('form')
+      .send({
+        grant_type: 'authorization_code',
+        client_id: pkceOptionalClient.id as string,
+        code: res.body.code,
+      });
     expect(res2.status).toBe(200);
     expect(res2.body.token_type).toBe('Bearer');
     expect(res2.body.scope).toBe('openid');
@@ -1166,5 +1237,32 @@ describe('OAuth2 Token', () => {
     expect(res2.status).toBe(200);
     expect(res2.body.patient).toBeDefined();
     expect(res2.body.encounter).toBeDefined();
+  });
+
+  test('IP address allow', async () => {
+    const res = await request(app).post('/auth/login').set('X-Forwarded-For', '5.5.5.5').type('json').send({
+      clientId: client.id,
+      email,
+      password,
+    });
+    expect(res.status).toBe(200);
+
+    const res2 = await request(app).post('/oauth2/token').type('form').send({
+      grant_type: 'authorization_code',
+      code: res.body.code,
+      client_id: client.id,
+      client_secret: client.secret,
+    });
+    expect(res2.status).toBe(200);
+  });
+
+  test('IP address block', async () => {
+    const res = await request(app).post('/auth/login').set('X-Forwarded-For', '6.6.6.6').type('json').send({
+      clientId: client.id,
+      email,
+      password,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.issue[0].details.text).toEqual('IP address not allowed');
   });
 });

@@ -1,5 +1,5 @@
 import { createReference, Operator, parseJWTPayload, ProfileResource, resolveId } from '@medplum/core';
-import { ClientApplication, Login, ProjectMembership, Reference } from '@medplum/fhirtypes';
+import { ClientApplication, Login, Project, ProjectMembership, Reference } from '@medplum/fhirtypes';
 import { createHash } from 'crypto';
 import { Request, RequestHandler, Response } from 'express';
 import { createRemoteJWKSet, jwtVerify, JWTVerifyOptions } from 'jose';
@@ -7,7 +7,7 @@ import { asyncWrap } from '../async';
 import { getConfig } from '../config';
 import { systemRepo } from '../fhir/repo';
 import { generateSecret, MedplumRefreshTokenClaims, verifyJwt } from './keys';
-import { getAuthTokens, getClientApplicationMembership, revokeLogin, timingSafeEqualStr } from './utils';
+import { getAuthTokens, getClient, getClientApplicationMembership, revokeLogin, timingSafeEqualStr } from './utils';
 
 type ClientIdAndSecret = { error?: string; clientId?: string; clientSecret?: string };
 
@@ -71,8 +71,15 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     return;
   }
 
-  const client = await validateClientIdAndSecret(res, clientId, clientSecret);
-  if (!client) {
+  let client: ClientApplication;
+  try {
+    client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+  } catch (err) {
+    sendTokenError(res, 'invalid_request', 'Invalid client');
+    return;
+  }
+
+  if (!(await validateClientIdAndSecret(res, client, clientSecret))) {
     return;
   }
 
@@ -82,6 +89,7 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     return;
   }
 
+  const project = await systemRepo.readReference(membership.project as Reference<Project>);
   const scope = (req.body.scope || 'openid') as string;
 
   const login = await systemRepo.createResource<Login>({
@@ -92,6 +100,7 @@ async function handleClientCredentials(req: Request, res: Response): Promise<voi
     membership: createReference(membership),
     authTime: new Date().toISOString(),
     granted: true,
+    superAdmin: project.superAdmin,
     scope,
   });
 
@@ -156,26 +165,36 @@ async function handleAuthorizationCode(req: Request, res: Response): Promise<voi
     return;
   }
 
-  // Authorization code flow requires either PKCE or client ID/secret
-  if (login.codeChallenge) {
-    const codeVerifier = req.body.code_verifier;
-    if (!codeVerifier) {
-      sendTokenError(res, 'invalid_request', 'Missing code verifier');
-      return;
+  let client: ClientApplication | undefined;
+  if (clientId) {
+    try {
+      client = await getClient(clientId);
+    } catch (err) {
+      sendTokenError(res, 'invalid_request', 'Invalid client');
+      return undefined;
     }
+  }
 
-    if (!verifyCode(login.codeChallenge, login.codeChallengeMethod as string, codeVerifier)) {
-      sendTokenError(res, 'invalid_request', 'Invalid code verifier');
+  if (clientSecret) {
+    if (!(await validateClientIdAndSecret(res, client, clientSecret))) {
       return;
     }
-  } else if (clientId && clientSecret) {
-    const client = await validateClientIdAndSecret(res, clientId, clientSecret);
-    if (!client) {
+  } else if (!client?.pkceOptional) {
+    if (login.codeChallenge) {
+      const codeVerifier = req.body.code_verifier;
+      if (!codeVerifier) {
+        sendTokenError(res, 'invalid_request', 'Missing code verifier');
+        return;
+      }
+
+      if (!verifyCode(login.codeChallenge, login.codeChallengeMethod as string, codeVerifier)) {
+        sendTokenError(res, 'invalid_request', 'Invalid code verifier');
+        return;
+      }
+    } else {
+      sendTokenError(res, 'invalid_request', 'Missing verification context');
       return;
     }
-  } else {
-    sendTokenError(res, 'invalid_request', 'Missing verification context');
-    return;
   }
 
   const membership = await systemRepo.readReference<ProjectMembership>(login.membership);
@@ -365,30 +384,22 @@ async function parseAuthorizationHeader(authHeader: string): Promise<ClientIdAnd
 
 async function validateClientIdAndSecret(
   res: Response,
-  clientId: string,
+  client: ClientApplication | undefined,
   clientSecret: string
-): Promise<ClientApplication | undefined> {
-  let client;
-  try {
-    client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
-  } catch (err) {
+): Promise<boolean> {
+  if (!client?.secret) {
     sendTokenError(res, 'invalid_request', 'Invalid client');
-    return undefined;
-  }
-
-  if (!client.secret) {
-    sendTokenError(res, 'invalid_request', 'Invalid client');
-    return undefined;
+    return false;
   }
 
   // Use a timing-safe-equal here so that we don't expose timing information which could be
   // used to infer the secret value
   if (!timingSafeEqualStr(client.secret, clientSecret)) {
     sendTokenError(res, 'invalid_request', 'Invalid secret');
-    return undefined;
+    return false;
   }
 
-  return client;
+  return true;
 }
 
 /**

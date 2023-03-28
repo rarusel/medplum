@@ -1,9 +1,17 @@
-import { createReference, getExtensionValue, isGone, matchesSearchRequest, Operator, stringify } from '@medplum/core';
+import {
+  createReference,
+  getExtensionValue,
+  isGone,
+  matchesSearchRequest,
+  normalizeOperationOutcome,
+  Operator,
+  parseSearchUrl,
+  stringify,
+} from '@medplum/core';
 import {
   AuditEvent,
   Bot,
   BundleEntry,
-  OperationOutcome,
   Practitioner,
   ProjectMembership,
   Reference,
@@ -17,7 +25,6 @@ import { URL } from 'url';
 import { MedplumRedisConfig } from '../config';
 import { executeBot } from '../fhir/operations/execute';
 import { systemRepo } from '../fhir/repo';
-import { parseSearchUrl } from '../fhir/search';
 import { logger } from '../logger';
 import { AuditEventOutcome } from '../util/auditevent';
 
@@ -201,6 +208,10 @@ async function addSubscriptionJobData(job: SubscriptionJobData): Promise<void> {
  * @returns The list of all subscriptions in this repository.
  */
 async function getSubscriptions(resource: Resource): Promise<Subscription[]> {
+  const project = resource.meta?.project;
+  if (!project) {
+    return [];
+  }
   const bundle = await systemRepo.search<Subscription>({
     resourceType: 'Subscription',
     count: 1000,
@@ -208,7 +219,7 @@ async function getSubscriptions(resource: Resource): Promise<Subscription[]> {
       {
         code: '_project',
         operator: Operator.EQUALS,
-        value: resource.meta?.project as string,
+        value: project,
       },
       {
         code: 'status',
@@ -231,7 +242,8 @@ export async function execSubscriptionJob(job: Job<SubscriptionJobData>): Promis
   try {
     subscription = await systemRepo.readResource<Subscription>('Subscription', subscriptionId);
   } catch (err) {
-    if (isGone(err as OperationOutcome)) {
+    const outcome = normalizeOperationOutcome(err);
+    if (isGone(outcome)) {
       // If the subscription was deleted, then stop processing it.
       return;
     }
@@ -248,7 +260,8 @@ export async function execSubscriptionJob(job: Job<SubscriptionJobData>): Promis
   try {
     currentVersion = await systemRepo.readResource(resourceType, id);
   } catch (err) {
-    if (isGone(err as OperationOutcome)) {
+    const outcome = normalizeOperationOutcome(err);
+    if (isGone(outcome)) {
       // If the resource was deleted, then stop processing it.
       return;
     }
@@ -301,15 +314,16 @@ async function sendRestHook(
     logger.debug('Rest hook headers: ' + JSON.stringify(headers, undefined, 2));
     const response = await fetch(url, { method: 'POST', headers, body });
     logger.info('Received rest hook status: ' + response.status);
+    const success = response.status >= 200 && response.status < 400;
     await createSubscriptionEvent(
       subscription,
       resource,
       startTime,
-      response.status === 200 ? AuditEventOutcome.Success : AuditEventOutcome.MinorFailure,
+      success ? AuditEventOutcome.Success : AuditEventOutcome.MinorFailure,
       `Attempt ${job.attemptsMade} received status ${response.status}`
     );
 
-    if (response.status >= 400) {
+    if (!success) {
       error = new Error('Received status ' + response.status);
     }
   } catch (ex) {

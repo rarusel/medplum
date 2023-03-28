@@ -1,5 +1,5 @@
 import { Checkbox, Group, NativeSelect, Textarea, TextInput } from '@mantine/core';
-import { buildTypeName, capitalize, PropertyType } from '@medplum/core';
+import { capitalize, getElementDefinitionTypeName, PropertyType } from '@medplum/core';
 import { ElementDefinition, ElementDefinitionType, OperationOutcome } from '@medplum/fhirtypes';
 import React, { useState } from 'react';
 import { AddressInput } from '../AddressInput/AddressInput';
@@ -16,6 +16,7 @@ import { DateTimeInput } from '../DateTimeInput/DateTimeInput';
 import { ExtensionInput } from '../ExtensionInput/ExtensionInput';
 import { HumanNameInput } from '../HumanNameInput/HumanNameInput';
 import { IdentifierInput } from '../IdentifierInput/IdentifierInput';
+import { MoneyInput } from '../MoneyInput/MoneyInput';
 import { PeriodInput } from '../PeriodInput/PeriodInput';
 import { QuantityInput } from '../QuantityInput/QuantityInput';
 import { RangeInput } from '../RangeInput/RangeInput';
@@ -109,6 +110,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
   const propertyType = props.elementDefinitionType.code as PropertyType;
   const name = props.name;
   const value = props.defaultValue;
+  const required = property.min !== undefined && property.min > 0;
 
   switch (propertyType) {
     // 2.24.0.1 Primitive Types
@@ -126,6 +128,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
           name={name}
           data-testid={name}
           defaultValue={value}
+          required={required}
           onChange={(e) => {
             if (props.onChange) {
               props.onChange(e.currentTarget.value);
@@ -142,6 +145,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
           name={name}
           data-testid={name}
           defaultValue={value}
+          required={required}
           onChange={(e) => {
             if (props.onChange) {
               props.onChange(e.currentTarget.value);
@@ -165,6 +169,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
           name={name}
           data-testid={name}
           defaultValue={value}
+          required={required}
           onChange={(e) => {
             if (props.onChange) {
               props.onChange(e.currentTarget.valueAsNumber);
@@ -195,6 +200,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
           name={name}
           data-testid={name}
           defaultValue={value}
+          required={required}
           onChange={(e) => {
             if (props.onChange) {
               props.onChange(e.currentTarget.value);
@@ -226,6 +232,8 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
       return <HumanNameInput name={name} defaultValue={value} onChange={props.onChange} />;
     case PropertyType.Identifier:
       return <IdentifierInput name={name} defaultValue={value} onChange={props.onChange} />;
+    case PropertyType.Money:
+      return <MoneyInput name={name} defaultValue={value} onChange={props.onChange} />;
     case PropertyType.Period:
       return <PeriodInput name={name} defaultValue={value} onChange={props.onChange} />;
     case PropertyType.Duration:
@@ -259,7 +267,7 @@ export function ElementDefinitionTypeInput(props: ElementDefinitionTypeInputProp
     default:
       return (
         <BackboneElementInput
-          typeName={buildTypeName(property.path?.split('.') as string[])}
+          typeName={getElementDefinitionTypeName(property)}
           defaultValue={value}
           onChange={props.onChange}
           outcome={props.outcome}

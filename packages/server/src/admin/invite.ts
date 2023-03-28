@@ -1,8 +1,16 @@
-import { forbidden, Operator, ProfileResource } from '@medplum/core';
-import { AccessPolicy, Practitioner, Project, Reference, ResourceType, User } from '@medplum/fhirtypes';
+import { badRequest, createReference, OperationOutcomeError, Operator, ProfileResource } from '@medplum/core';
+import {
+  AccessPolicy,
+  Practitioner,
+  Project,
+  ProjectMembership,
+  Reference,
+  ResourceType,
+  User,
+} from '@medplum/fhirtypes';
 import bcrypt from 'bcryptjs';
 import { Request, Response } from 'express';
-import { body, validationResult } from 'express-validator';
+import { body, oneOf, validationResult } from 'express-validator';
 import { resetPassword } from '../auth/resetpassword';
 import { createProfile, createProjectMembership } from '../auth/utils';
 import { getConfig } from '../config';
@@ -12,51 +20,70 @@ import { systemRepo } from '../fhir/repo';
 import { logger } from '../logger';
 import { generateSecret } from '../oauth/keys';
 import { getUserByEmailWithoutProject } from '../oauth/utils';
-import { verifyProjectAdmin } from './utils';
 
 export const inviteValidators = [
   body('resourceType').isIn(['Patient', 'Practitioner', 'RelatedPerson']).withMessage('Resource type is required'),
   body('firstName').notEmpty().withMessage('First name is required'),
   body('lastName').notEmpty().withMessage('Last name is required'),
-  body('email').isEmail().withMessage('Valid email address is required'),
+  oneOf(
+    [
+      body('email').isEmail().withMessage('Valid email address is required'),
+      body('externalId').notEmpty().withMessage('External ID cannot be empty'),
+    ],
+    'Either email or externalId is required'
+  ),
 ];
 
 export async function inviteHandler(req: Request, res: Response): Promise<void> {
-  const project = await verifyProjectAdmin(req, res);
-  if (!project) {
-    sendOutcome(res, forbidden);
-    return;
-  }
-
   const errors = validationResult(req);
   if (!errors.isEmpty()) {
     sendOutcome(res, invalidRequest(errors));
     return;
   }
 
-  const { profile } = await inviteUser({
-    ...req.body,
-    project: project,
-  });
+  const inviteRequest = { ...req.body } as InviteRequest;
+  const { projectId } = req.params;
+  if (res.locals.project.superAdmin) {
+    inviteRequest.project = await systemRepo.readResource('Project', projectId as string);
+  } else {
+    inviteRequest.project = res.locals.project;
+  }
 
-  res.status(200).json({ profile });
+  try {
+    const { membership } = await inviteUser(inviteRequest);
+    res.status(200).json(membership);
+  } catch (err: any) {
+    logger.info(err);
+    res.status(200).json({ error: err });
+  }
 }
 
 export interface InviteRequest {
-  readonly project: Project;
-  readonly resourceType: 'Patient' | 'Practitioner' | 'RelatedPerson';
-  readonly firstName: string;
-  readonly lastName: string;
-  readonly email: string;
-  readonly accessPolicy?: Reference<AccessPolicy>;
-  readonly sendEmail?: boolean;
+  project: Project;
+  resourceType: 'Patient' | 'Practitioner' | 'RelatedPerson';
+  firstName: string;
+  lastName: string;
+  email?: string;
+  externalId?: string;
+  accessPolicy?: Reference<AccessPolicy>;
+  sendEmail?: boolean;
+  password?: string;
+  invitedBy?: Reference<User>;
 }
 
-export async function inviteUser(request: InviteRequest): Promise<{ user: User; profile: ProfileResource }> {
+export async function inviteUser(
+  request: InviteRequest
+): Promise<{ user: User; profile: ProfileResource; membership: ProjectMembership }> {
   const project = request.project;
-  let user = await getUserByEmailWithoutProject(request.email);
+  let user = undefined;
   let existingUser = true;
   let passwordResetUrl = undefined;
+  let profile = undefined;
+
+  if (request.email) {
+    user = await getUserByEmailWithoutProject(request.email);
+    profile = await searchForExistingProfile(project, request.resourceType, request.email);
+  }
 
   if (!user) {
     existingUser = false;
@@ -64,7 +91,6 @@ export async function inviteUser(request: InviteRequest): Promise<{ user: User; 
     passwordResetUrl = await resetPassword(user);
   }
 
-  let profile = await searchForExistingProfile(project, request.resourceType, request.email);
   if (!profile) {
     profile = (await createProfile(
       project,
@@ -74,27 +100,49 @@ export async function inviteUser(request: InviteRequest): Promise<{ user: User; 
       request.email
     )) as Practitioner;
   }
-  await createProjectMembership(user, project, profile, request.accessPolicy);
 
-  if (request.sendEmail !== false) {
-    await sendInviteEmail(request, user, existingUser, passwordResetUrl);
+  const membership = await createProjectMembership(user, project, profile, request.accessPolicy);
+
+  if (request.email && request.sendEmail !== false) {
+    try {
+      await sendInviteEmail(request, user, existingUser, passwordResetUrl);
+    } catch (err) {
+      throw new OperationOutcomeError(badRequest('Could not send email. Make sure you have AWS SES set up.'), err);
+    }
   }
 
-  return { user, profile };
+  return { user, profile, membership };
 }
 
 async function createUser(request: InviteRequest): Promise<User> {
-  const { firstName, lastName, email } = request;
-  const password = generateSecret(16);
+  const { firstName, lastName, email, externalId } = request;
+  const password = request.password || generateSecret(16);
   logger.info('Create user ' + email);
   const passwordHash = await bcrypt.hash(password, 10);
-  const result = await systemRepo.createResource<User>({
-    resourceType: 'User',
-    firstName,
-    lastName,
-    email,
-    passwordHash,
-  });
+  let result: User;
+
+  if (externalId) {
+    // If creating a user by externalId, then we are creating a user for a third-party system.
+    // The user must be scoped to the project.
+    result = await systemRepo.createResource<User>({
+      resourceType: 'User',
+      firstName,
+      lastName,
+      externalId,
+      passwordHash,
+      project: createReference(request.project),
+    });
+  } else {
+    // Otherwise, we are creating a user for Medplum.
+    result = await systemRepo.createResource<User>({
+      resourceType: 'User',
+      firstName,
+      lastName,
+      email,
+      passwordHash,
+    });
+  }
+
   logger.info('Created: ' + result.id);
   return result;
 }

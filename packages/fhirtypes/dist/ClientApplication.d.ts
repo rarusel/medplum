@@ -3,6 +3,7 @@
  * Do not edit manually.
  */
 
+import { IdentityProvider } from './IdentityProvider';
 import { Meta } from './Meta';
 
 /**
@@ -72,4 +73,16 @@ export interface ClientApplication {
    * Optional launch URI for SMART EHR launch sequence.
    */
   launchUri?: string;
+
+  /**
+   * Flag to make PKCE optional for this client application. PKCE is
+   * required by default for compliance with Smart App Launch. It can be
+   * disabled for compatibility with legacy client applications.
+   */
+  pkceOptional?: boolean;
+
+  /**
+   * Optional external Identity Provider (IdP) for the client application.
+   */
+  identityProvider?: IdentityProvider;
 }

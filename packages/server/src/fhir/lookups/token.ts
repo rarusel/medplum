@@ -18,11 +18,10 @@ import {
   SearchParameter,
 } from '@medplum/fhirtypes';
 import { PoolClient } from 'pg';
-import { getClient } from '../../database';
 import { Column, Condition, Conjunction, Disjunction, Expression, Operator, SelectQuery } from '../sql';
 import { getSearchParameters } from '../structure';
 import { LookupTable } from './lookuptable';
-import { compareArrays } from './util';
+import { compareArrays, deriveIdentifierSearchParameter } from './util';
 
 interface Token {
   readonly code: string;
@@ -75,11 +74,11 @@ export class TokenTable extends LookupTable<Token> {
     const tokens = getTokens(resource);
     const resourceType = resource.resourceType;
     const resourceId = resource.id as string;
-    const existing = await getExistingValues(resourceType, resourceId);
+    const existing = await getExistingValues(client, resourceType, resourceId);
 
     if (!compareArrays(tokens, existing)) {
       if (existing.length > 0) {
-        await this.deleteValuesForResource(resource);
+        await this.deleteValuesForResource(client, resource);
       }
 
       const values = [];
@@ -100,30 +99,28 @@ export class TokenTable extends LookupTable<Token> {
   }
 
   /**
-   * Adds "where" conditions to the select query builder.
+   * Builds a "where" condition for the select query builder.
    * @param selectQuery The select query builder.
    * @param resourceType The resource type.
-   * @param predicate The conjunction where conditions should be added.
    * @param filter The search filter details.
    */
-  addWhere(selectQuery: SelectQuery, resourceType: ResourceType, predicate: Conjunction, filter: Filter): void {
+  buildWhere(selectQuery: SelectQuery, resourceType: ResourceType, filter: Filter): Expression {
     const tableName = getTableName(resourceType);
     const joinName = selectQuery.getNextJoinAlias();
-    const subQuery = new SelectQuery(tableName)
-      .raw(`DISTINCT ON ("${tableName}"."resourceId") *`)
-      .where('code', Operator.EQUALS, filter.code)
-      .orderBy('resourceId');
-    const disjunction = new Disjunction([]);
-    for (const option of filter.value.split(',')) {
-      disjunction.expressions.push(buildWhereCondition(tableName, filter.operator, option));
-    }
-    subQuery.whereExpr(disjunction);
-    selectQuery.join(joinName, 'id', 'resourceId', subQuery);
+    const joinOnExpression = new Conjunction([
+      new Condition(new Column(resourceType, 'id'), Operator.EQUALS, new Column(joinName, 'resourceId')),
+      new Condition(new Column(joinName, 'code'), Operator.EQUALS, filter.code),
+    ]);
+    joinOnExpression.expressions.push(buildWhereExpression(joinName, filter));
+    selectQuery.join(tableName, joinName, joinOnExpression);
 
     // If the filter is "not equals", then we're looking for ID=null
     // If the filter is "equals", then we're looking for ID!=null
-    const sqlOperator = filter.operator === FhirOperator.NOT_EQUALS ? Operator.EQUALS : Operator.NOT_EQUALS;
-    predicate.expressions.push(new Condition(new Column(joinName, 'resourceId'), sqlOperator, null));
+    const sqlOperator =
+      filter.operator === FhirOperator.NOT || filter.operator === FhirOperator.NOT_EQUALS
+        ? Operator.EQUALS
+        : Operator.NOT_EQUALS;
+    return new Condition(new Column(joinName, 'resourceId'), sqlOperator, null);
   }
 
   /**
@@ -135,11 +132,12 @@ export class TokenTable extends LookupTable<Token> {
   addOrderBy(selectQuery: SelectQuery, resourceType: ResourceType, sortRule: SortRule): void {
     const tableName = getTableName(resourceType);
     const joinName = selectQuery.getNextJoinAlias();
-    const subQuery = new SelectQuery(tableName)
-      .raw(`DISTINCT ON ("${tableName}"."resourceId") *`)
-      .where('code', Operator.EQUALS, sortRule.code)
-      .orderBy('resourceId');
-    selectQuery.join(joinName, 'id', 'resourceId', subQuery);
+    const joinOnExpression = new Conjunction([
+      new Condition(new Column(resourceType, 'id'), Operator.EQUALS, new Column(joinName, 'resourceId')),
+      new Condition(new Column(joinName, 'code'), Operator.EQUALS, sortRule.code),
+    ]);
+    joinOnExpression.expressions.push(new Condition(new Column(joinName, 'code'), Operator.EQUALS, sortRule.code));
+    selectQuery.join(tableName, joinName, joinOnExpression);
     selectQuery.orderBy(new Column(joinName, 'value'), sortRule.descending);
   }
 }
@@ -153,6 +151,10 @@ export class TokenTable extends LookupTable<Token> {
 function isIndexed(searchParam: SearchParameter, resourceType: string): boolean {
   if (searchParam.type !== 'token') {
     return false;
+  }
+
+  if (searchParam.code?.endsWith(':identifier')) {
+    return true;
   }
 
   const details = getSearchParameterDetails(resourceType, searchParam);
@@ -203,14 +205,31 @@ function getTokens(resource: Resource): Token[] {
   if (searchParams) {
     for (const searchParam of Object.values(searchParams)) {
       if (isIndexed(searchParam, resource.resourceType)) {
-        const typedValues = evalFhirPathTyped(searchParam.expression as string, typedResource);
-        for (const typedValue of typedValues) {
-          buildTokens(result, searchParam, typedValue);
-        }
+        buildTokensForSearchParameter(result, typedResource, searchParam);
+      }
+      if (searchParam.type === 'reference') {
+        buildTokensForSearchParameter(result, typedResource, deriveIdentifierSearchParameter(searchParam));
       }
     }
   }
   return result;
+}
+
+/**
+ * Builds a list of zero or more tokens for a search parameter and resource.
+ * @param result The result array where tokens will be added.
+ * @param typedResource The typed resource.
+ * @param searchParam The search parameter.
+ */
+function buildTokensForSearchParameter(
+  result: Token[],
+  typedResource: TypedValue[],
+  searchParam: SearchParameter
+): void {
+  const typedValues = evalFhirPathTyped(searchParam.expression as string, typedResource);
+  for (const typedValue of typedValues) {
+    buildTokens(result, searchParam, typedValue);
+  }
 }
 
 /**
@@ -256,7 +275,7 @@ function buildCodeableConceptToken(
   codeableConcept: CodeableConcept | undefined
 ): void {
   if (codeableConcept?.text) {
-    buildSimpleToken(result, searchParam, undefined, codeableConcept.text);
+    buildSimpleToken(result, searchParam, 'text', codeableConcept.text);
   }
   if (codeableConcept?.coding) {
     for (const coding of codeableConcept.coding) {
@@ -272,7 +291,12 @@ function buildCodeableConceptToken(
  * @param coding The Coding object to be indexed.
  */
 function buildCodingToken(result: Token[], searchParam: SearchParameter, coding: Coding | undefined): void {
-  buildSimpleToken(result, searchParam, coding?.system, coding?.code);
+  if (coding) {
+    if (coding.display) {
+      buildSimpleToken(result, searchParam, 'text', coding.display);
+    }
+    buildSimpleToken(result, searchParam, coding.system, coding.code);
+  }
 }
 
 /**
@@ -302,7 +326,11 @@ function buildSimpleToken(
   system: string | undefined,
   value: string | undefined
 ): void {
-  if (system || value) {
+  // Only add the token if there is a system or a value, and if it is not already in the list.
+  if (
+    (system || value) &&
+    !result.some((token) => token.code === searchParam.code && token.system === system && token.value === value)
+  ) {
     result.push({
       code: searchParam.code as string,
       system,
@@ -316,7 +344,7 @@ function buildSimpleToken(
  * @param resourceId The FHIR resource ID.
  * @returns Promise for the list of indexed tokens  .
  */
-async function getExistingValues(resourceType: ResourceType, resourceId: string): Promise<Token[]> {
+async function getExistingValues(client: PoolClient, resourceType: ResourceType, resourceId: string): Promise<Token[]> {
   const tableName = getTableName(resourceType);
   return new SelectQuery(tableName)
     .column('code')
@@ -324,7 +352,7 @@ async function getExistingValues(resourceType: ResourceType, resourceId: string)
     .column('value')
     .where('resourceId', Operator.EQUALS, resourceId)
     .orderBy('index')
-    .execute(getClient())
+    .execute(client)
     .then((result) =>
       result.map((row) => ({
         code: row.code,
@@ -334,23 +362,119 @@ async function getExistingValues(resourceType: ResourceType, resourceId: string)
     );
 }
 
+function buildWhereExpression(tableName: string, filter: Filter): Expression {
+  const disjunction = new Disjunction([]);
+  for (const option of filter.value.split(',')) {
+    disjunction.expressions.push(buildWhereCondition(tableName, filter.operator, option));
+  }
+  return disjunction;
+}
+
 function buildWhereCondition(tableName: string, operator: FhirOperator, query: string): Expression {
   const parts = query.split('|');
   if (parts.length === 2) {
-    return new Conjunction([
-      new Condition(new Column(tableName, 'system'), Operator.EQUALS, parts[0]),
-      buildValueCondition(tableName, operator, parts[1]),
-    ]);
+    const systemCondition = new Condition(new Column(tableName, 'system'), Operator.EQUALS, parts[0]);
+    return parts[1]
+      ? new Conjunction([systemCondition, buildValueCondition(tableName, operator, parts[1])])
+      : systemCondition;
   } else {
     return buildValueCondition(tableName, operator, query);
   }
 }
 
-function buildValueCondition(tableName: string, operator: FhirOperator, value: string): Condition {
+function buildValueCondition(tableName: string, operator: FhirOperator, value: string): Expression {
+  if (operator === FhirOperator.IN) {
+    return buildInValueSetCondition(tableName, value);
+  }
   const column = new Column(tableName, 'value');
-  if (operator === FhirOperator.CONTAINS) {
+  if (operator === FhirOperator.TEXT) {
+    return new Conjunction([
+      new Condition(new Column(tableName, 'system'), Operator.EQUALS, 'text'),
+      new Condition(column, Operator.LIKE, value.trim() + '%'),
+    ]);
+  } else if (operator === FhirOperator.CONTAINS) {
     return new Condition(column, Operator.LIKE, value.trim() + '%');
   } else {
     return new Condition(column, Operator.EQUALS, value.trim());
   }
+}
+
+/**
+ * Buildes "where" condition for token ":in" operator.
+ * @param tableName The token table name / join alias.
+ * @param value The value of the ":in" operator.
+ * @returns The "where" condition.
+ */
+function buildInValueSetCondition(tableName: string, value: string): Condition {
+  // This is complicated
+  //
+  // Here is an example FHIR expression:
+  //
+  //    Condition?code:in=http://hl7.org/fhir/ValueSet/condition-code
+  //
+  // The ValueSet URL is a reference to a ValueSet resource.
+  // The ValueSet resource contains a list of systems and/or codes.
+  //
+  // Consider these "ValueSet" table columns:
+  //
+  //          Column        |           Type           | Collation | Nullable | Default
+  //   ---------------------+--------------------------+-----------+----------+---------
+  //    id                  | uuid                     |           | not null |
+  //    url                 | text                     |           |          |
+  //    reference           | text[]                   |           |          |
+  //
+  // Consider these "Condition_Token" table columns:
+  //
+  //      Column   |  Type   | Collation | Nullable | Default
+  //   ------------+---------+-----------+----------+---------
+  //    resourceId | uuid    |           | not null |
+  //    code       | text    |           | not null |
+  //    system     | text    |           |          |
+  //    value      | text    |           |          |
+  //
+  // In plain english:
+  //
+  //   We want the Condition resources
+  //   with a fixed "code" column value (referring to the "code" column in the "Condition" table)
+  //   where the "system" column value is in the "reference" column of the "ValueSet" table
+  //
+  // Now imagine the query for just "Condition_Token" and "ValueSet":
+  //
+  //  SELECT "Condition_Token"."resourceId"
+  //  FROM "Condition_Token"
+  //  WHERE "Condition_Token"."code"='code'
+  //  AND "Condition_Token"."system"=ANY(
+  //    (
+  //       SELECT "ValueSet"."reference"
+  //       FROM "ValueSet"
+  //       WHERE "ValueSet"."url"='http://hl7.org/fhir/ValueSet/condition-code'
+  //       LIMIT 1
+  //    )::TEXT[]
+  //  )
+  //
+  // Now we need to add the query for "Condition" and "Condition_Token" and "ValueSet":
+  //
+  //   SELECT "Condition"."id"
+  //   FROM "Condition"
+  //   LEFT JOIN "Condition_Token" ON (
+  //     "Condition_Token"."resourceId"="Condition"."id"
+  //     AND
+  //     "Condition_Token"."code"='code'
+  //     AND
+  //     "Condition_Token"."system"=ANY(
+  //       (
+  //         SELECT "ValueSet"."reference"
+  //         FROM "ValueSet"
+  //         WHERE "ValueSet"."url"='http://hl7.org/fhir/ValueSet/condition-code'
+  //         LIMIT 1
+  //       )::TEXT[]
+  //     )
+  //   )
+  //
+  return new Condition(
+    new Column(tableName, 'system'),
+    Operator.IN_SUBQUERY,
+    new SelectQuery('ValueSet').column('reference').where('url', Operator.EQUALS, value).limit(1),
+    'TEXT[]'
+  );
 }

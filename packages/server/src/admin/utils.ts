@@ -1,66 +1,20 @@
-import { Operator } from '@medplum/core';
-import { BundleEntry, Project, ProjectMembership } from '@medplum/fhirtypes';
-import { Request, Response } from 'express';
-import { systemRepo } from '../fhir/repo';
+import { forbidden, OperationOutcomeError } from '@medplum/core';
+import { Project, ProjectMembership } from '@medplum/fhirtypes';
+import { NextFunction, Request, Response } from 'express';
 
 /**
  * Verifies that the current user is a project admin.
- * Assumes that "projectId" is a path parameter.
- * Assumes that res.locals.user is populated by authenticateToken middleware.
  * @param req The request.
  * @param res The response.
- * @returns Project details if the current user is a project admin; undefined otherwise.
+ * @param next The next handler function.
  */
-export async function verifyProjectAdmin(req: Request, res: Response): Promise<Project | undefined> {
-  const { projectId } = req.params;
-
-  const project = await systemRepo.readResource<Project>('Project', projectId);
-
-  const bundle = await systemRepo.search<ProjectMembership>({
-    resourceType: 'ProjectMembership',
-    count: 1,
-    filters: [
-      {
-        code: 'project',
-        operator: Operator.EQUALS,
-        value: 'Project/' + projectId,
-      },
-      {
-        code: 'user',
-        operator: Operator.EQUALS,
-        value: 'User/' + res.locals.user,
-      },
-    ],
-  });
-
-  if (bundle.entry?.length === 0) {
-    return undefined;
+export async function verifyProjectAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const project = res.locals.project as Project;
+  const membership = res.locals.membership as ProjectMembership;
+  if (!project.superAdmin && !membership.admin) {
+    next(new OperationOutcomeError(forbidden));
+    return;
   }
 
-  const membership = bundle.entry?.[0].resource as ProjectMembership;
-  if (!membership.admin) {
-    return undefined;
-  }
-
-  return project;
-}
-
-/**
- * Returns the list of project memberships for the specified project.
- * @param projectId The project ID.
- * @returns The list of project memberships.
- */
-export async function getProjectMemberships(projectId: string): Promise<ProjectMembership[]> {
-  const bundle = await systemRepo.search<ProjectMembership>({
-    resourceType: 'ProjectMembership',
-    count: 1000,
-    filters: [
-      {
-        code: 'project',
-        operator: Operator.EQUALS,
-        value: 'Project/' + projectId,
-      },
-    ],
-  });
-  return (bundle.entry as BundleEntry<ProjectMembership>[]).map((entry) => entry.resource as ProjectMembership);
+  next();
 }

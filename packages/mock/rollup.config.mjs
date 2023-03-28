@@ -8,7 +8,8 @@ const extensions = ['.ts'];
 
 const globals = {
   '@medplum/core': 'medplum.core',
-  'fast-json-patch': 'fast-json-patch',
+  '@medplum/fhir-router': 'medplum.fhirRouter',
+  'rfc6902': 'rfc6902',
 };
 
 export default {
@@ -43,7 +44,7 @@ export default {
   ],
   plugins: [
     resolve({ extensions }),
-    typescript(),
+    typescript({ declaration: false }),
     json(),
     {
       buildEnd: () => {

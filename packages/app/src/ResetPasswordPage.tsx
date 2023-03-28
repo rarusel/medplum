@@ -1,4 +1,5 @@
 import { Anchor, Button, Group, Stack, TextInput, Title } from '@mantine/core';
+import { normalizeOperationOutcome } from '@medplum/core';
 import { OperationOutcome } from '@medplum/fhirtypes';
 import { Document, Form, getErrorsForInput, getRecaptcha, initRecaptcha, Logo, useMedplum } from '@medplum/react';
 import React, { useEffect, useState } from 'react';
@@ -27,11 +28,11 @@ export function ResetPasswordPage(): JSX.Element {
             getRecaptcha(recaptchaSiteKey)
               .then((recaptchaToken: string) => medplum.post('auth/resetpassword', { ...formData, recaptchaToken }))
               .then(() => setSuccess(true))
-              .catch(setOutcome);
+              .catch((err) => setOutcome(normalizeOperationOutcome(err)));
           } else {
             medplum.post('auth/resetpassword', { ...formData })
               .then(() => setSuccess(true))
-              .catch(setOutcome);
+              .catch((err) => setOutcome(normalizeOperationOutcome(err)));
           }
         }}
       >

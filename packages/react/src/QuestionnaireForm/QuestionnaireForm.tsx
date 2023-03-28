@@ -66,7 +66,6 @@ export function QuestionnaireForm(props: QuestionnaireFormProps): JSX.Element | 
   function setItems(newResponseItems: QuestionnaireResponseItem[]): void {
     const newResponse: QuestionnaireResponse = {
       resourceType: 'QuestionnaireResponse',
-      status: 'completed',
       item: newResponseItems,
     };
     setResponse(newResponse);
@@ -88,6 +87,7 @@ export function QuestionnaireForm(props: QuestionnaireFormProps): JSX.Element | 
             subject: props.subject,
             source: createReference(source as ProfileResource),
             authored: new Date().toISOString(),
+            status: 'completed',
           });
         }
       }}
@@ -320,6 +320,7 @@ export function QuestionnaireFormItem(props: QuestionnaireFormItemProps): JSX.El
           name={name}
           defaultValue={initial?.valueQuantity}
           onChange={(newValue) => onChangeAnswer({ valueQuantity: newValue })}
+          disableWheel
         />
       );
     case QuestionnaireItemType.choice:
@@ -426,7 +427,6 @@ function QuestionnaireChoiceRadioInput(props: QuestionnaireChoiceInputProps): JS
   return (
     <Radio.Group
       name={name}
-      orientation="vertical"
       defaultValue={defaultValue}
       onChange={(newValue) => {
         const option = options.find((option) => option[0] === newValue);

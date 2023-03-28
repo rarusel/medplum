@@ -21,6 +21,7 @@ export enum Operator {
   IN = ' IN ',
   ARRAY_CONTAINS = 'ARRAY_CONTAINS',
   TSVECTOR_MATCH = '@@',
+  IN_SUBQUERY = 'IN_SUBQUERY',
 }
 
 export class Column {
@@ -55,6 +56,8 @@ export class Condition implements Expression {
   buildSql(sql: SqlBuilder): void {
     if (this.operator === Operator.ARRAY_CONTAINS) {
       this.buildArrayCondition(sql);
+    } else if (this.operator === Operator.IN_SUBQUERY) {
+      this.buildInSubqueryCondition(sql);
     } else {
       this.buildSimpleCondition(sql);
     }
@@ -70,6 +73,19 @@ export class Condition implements Expression {
     sql.append(']');
     if (this.parameterType) {
       sql.append('::' + this.parameterType);
+    }
+    sql.append(')');
+  }
+
+  protected buildInSubqueryCondition(sql: SqlBuilder): void {
+    sql.appendColumn(this.column);
+    sql.append('=ANY(');
+    if (this.parameterType) {
+      sql.append('(');
+    }
+    (this.parameter as SelectQuery).buildSql(sql);
+    if (this.parameterType) {
+      sql.append(')::' + this.parameterType);
     }
     sql.append(')');
   }
@@ -164,7 +180,11 @@ export class Disjunction extends Connective {
 }
 
 export class Join {
-  constructor(readonly left: Column, readonly right: Column, readonly subQuery?: SelectQuery) {}
+  constructor(readonly joinItem: string | SelectQuery, readonly joinAlias: string, readonly onExpression: Expression) {}
+}
+
+export class GroupBy {
+  constructor(readonly column: Column) {}
 }
 
 export class OrderBy {
@@ -208,8 +228,12 @@ export class SqlBuilder {
   }
 
   param(value: any): this {
-    this.#values.push(value);
-    this.#sql.push('$' + this.#values.length);
+    if (value instanceof Column) {
+      this.appendColumn(value);
+    } else {
+      this.#values.push(value);
+      this.#sql.push('$' + this.#values.length);
+    }
     return this;
   }
 
@@ -269,6 +293,7 @@ export abstract class BaseQuery {
 export class SelectQuery extends BaseQuery {
   readonly columns: Column[];
   readonly joins: Join[];
+  readonly groupBys: GroupBy[];
   readonly orderBys: OrderBy[];
   limit_: number;
   offset_: number;
@@ -277,6 +302,7 @@ export class SelectQuery extends BaseQuery {
     super(tableName);
     this.columns = [];
     this.joins = [];
+    this.groupBys = [];
     this.orderBys = [];
     this.limit_ = 0;
     this.offset_ = 0;
@@ -296,10 +322,13 @@ export class SelectQuery extends BaseQuery {
     return `T${this.joins.length + 1}`;
   }
 
-  join(rightTableName: string, leftColumnName: string, rightColumnName: string, subQuery?: SelectQuery): this {
-    this.joins.push(
-      new Join(new Column(this.tableName, leftColumnName), new Column(rightTableName, rightColumnName), subQuery)
-    );
+  join(joinItem: string | SelectQuery, joinAlias: string, onExpression: Expression): this {
+    this.joins.push(new Join(joinItem, joinAlias, onExpression));
+    return this;
+  }
+
+  groupBy(column: Column | string): this {
+    this.groupBys.push(new GroupBy(getColumn(column, this.tableName)));
     return this;
   }
 
@@ -322,6 +351,7 @@ export class SelectQuery extends BaseQuery {
     this.#buildSelect(sql);
     this.#buildFrom(sql);
     this.buildConditions(sql);
+    this.#buildGroupBy(sql);
     this.#buildOrderBy(sql);
 
     if (this.limit_ > 0) {
@@ -335,7 +365,7 @@ export class SelectQuery extends BaseQuery {
     }
   }
 
-  async execute(conn: Pool): Promise<any[]> {
+  async execute(conn: Pool | PoolClient): Promise<any[]> {
     const sql = new SqlBuilder();
     this.buildSql(sql);
     return sql.execute(conn);
@@ -386,16 +416,27 @@ export class SelectQuery extends BaseQuery {
 
     for (const join of this.joins) {
       sql.append(' LEFT JOIN ');
-      if (join.subQuery) {
+      if (typeof join.joinItem === 'string') {
+        sql.appendIdentifier(join.joinItem);
+      } else {
         sql.append(' ( ');
-        join.subQuery.buildSql(sql);
+        join.joinItem.buildSql(sql);
         sql.append(' ) ');
       }
-      sql.appendIdentifier(join.right.tableName as string);
+      sql.append(' AS ');
+      sql.appendIdentifier(join.joinAlias);
       sql.append(' ON ');
-      sql.appendColumn(join.left);
-      sql.append('=');
-      sql.appendColumn(join.right);
+      join.onExpression.buildSql(sql);
+    }
+  }
+
+  #buildGroupBy(sql: SqlBuilder): void {
+    let first = true;
+
+    for (const groupBy of this.groupBys) {
+      sql.append(first ? ' GROUP BY ' : ', ');
+      sql.appendColumn(groupBy.column);
+      first = false;
     }
   }
 
@@ -404,7 +445,13 @@ export class SelectQuery extends BaseQuery {
 
     for (const orderBy of this.orderBys) {
       sql.append(first ? ' ORDER BY ' : ', ');
+      if (orderBy.column.tableName && orderBy.column.tableName !== this.tableName) {
+        sql.append('MIN(');
+      }
       sql.appendColumn(orderBy.column);
+      if (orderBy.column.tableName && orderBy.column.tableName !== this.tableName) {
+        sql.append(')');
+      }
       sql.append(orderBy.descending ? ' DESC' : ' ASC');
       first = false;
     }

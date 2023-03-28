@@ -1,8 +1,8 @@
 import {
-  buildTypeName,
   formatDateTime,
   formatPeriod,
   formatTiming,
+  getElementDefinitionTypeName,
   getTypedPropertyValue,
   PropertyType,
   TypedValue,
@@ -19,6 +19,7 @@ import { ContactDetailDisplay } from '../ContactDetailDisplay/ContactDetailDispl
 import { ContactPointDisplay } from '../ContactPointDisplay/ContactPointDisplay';
 import { HumanNameDisplay } from '../HumanNameDisplay/HumanNameDisplay';
 import { IdentifierDisplay } from '../IdentifierDisplay/IdentifierDisplay';
+import { MoneyDisplay } from '../MoneyDisplay/MoneyDisplay';
 import { QuantityDisplay } from '../QuantityDisplay/QuantityDisplay';
 import { RangeDisplay } from '../RangeDisplay/RangeDisplay';
 import { RatioDisplay } from '../RatioDisplay/RatioDisplay';
@@ -35,6 +36,9 @@ export interface ResourcePropertyDisplayProps {
   link?: boolean;
 }
 
+/**
+ * Low-level component that renders a property from a given resource, given type information
+ */
 export function ResourcePropertyDisplay(props: ResourcePropertyDisplayProps): JSX.Element {
   const { property, propertyType, value } = props;
 
@@ -90,6 +94,8 @@ export function ResourcePropertyDisplay(props: ResourcePropertyDisplayProps): JS
       return <HumanNameDisplay value={value} />;
     case PropertyType.Identifier:
       return <IdentifierDisplay value={value} />;
+    case PropertyType.Money:
+      return <MoneyDisplay value={value} />;
     case PropertyType.Period:
       return <>{formatPeriod(value)}</>;
     case PropertyType.Quantity:
@@ -118,7 +124,7 @@ export function ResourcePropertyDisplay(props: ResourcePropertyDisplayProps): JS
       }
       return (
         <BackboneElementDisplay
-          value={{ type: buildTypeName(property?.path?.split('.') as string[]), value }}
+          value={{ type: getElementDefinitionTypeName(property), value }}
           compact={true}
           ignoreMissingValues={props.ignoreMissingValues}
         />

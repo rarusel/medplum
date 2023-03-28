@@ -1,10 +1,13 @@
-#!/usr/bin/env node
-import { MedplumClient, normalizeErrorString } from '@medplum/core';
+import { getDisplayString, MedplumClient, normalizeErrorString } from '@medplum/core';
 import { Bot, OperationOutcome } from '@medplum/fhirtypes';
+import { exec } from 'child_process';
 import dotenv from 'dotenv';
 import { existsSync, readFileSync } from 'fs';
+import { createServer } from 'http';
 import fetch from 'node-fetch';
+import { platform } from 'os';
 import { resolve } from 'path';
+import { FileSystemStorage } from './storage';
 
 interface MedplumConfig {
   readonly bots?: MedplumBotConfig[];
@@ -17,20 +20,165 @@ interface MedplumBotConfig {
   readonly dist?: string;
 }
 
+const baseUrl = process.env['MEDPLUM_BASE_URL'] || 'https://api.medplum.com/';
+const clientId = 'medplum-cli';
+const redirectUri = 'http://localhost:9615';
+
 export async function main(medplum: MedplumClient, argv: string[]): Promise<void> {
   if (argv.length < 3) {
     console.log('Usage: medplum <command>');
     return;
   }
 
-  const command = argv[2];
-  if (command === 'save-bot') {
-    await runBotCommands(medplum, argv, ['save']);
-  } else if (command === 'deploy-bot') {
-    await runBotCommands(medplum, argv, ['save', 'deploy']);
-  } else {
-    console.log(`Unknown command: ${command}`);
+  // Legacy support for MEDPLUM_CLIENT_ID and MEDPLUM_CLIENT_SECRET environment variables
+  const clientId = process.env['MEDPLUM_CLIENT_ID'];
+  const clientSecret = process.env['MEDPLUM_CLIENT_SECRET'];
+  if (clientId && clientSecret) {
+    await medplum.startClientLogin(clientId, clientSecret);
   }
+
+  try {
+    const command = argv[2].toLowerCase();
+    switch (command) {
+      //
+      // Auth commands
+      //
+      case 'login':
+        await startLogin(medplum);
+        break;
+      case 'whoami':
+        printMe(medplum);
+        break;
+      //
+      // REST commands
+      //
+      case 'delete':
+        prettyPrint(await medplum.delete(cleanUrl(argv[3])));
+        break;
+      case 'get':
+        prettyPrint(await medplum.get(cleanUrl(argv[3])));
+        break;
+      case 'patch':
+        prettyPrint(await medplum.patch(cleanUrl(argv[3]), parseBody(argv[4])));
+        break;
+      case 'post':
+        prettyPrint(await medplum.post(cleanUrl(argv[3]), parseBody(argv[4])));
+        break;
+      case 'put':
+        prettyPrint(await medplum.put(cleanUrl(argv[3]), parseBody(argv[4])));
+        break;
+      //
+      // Bot commands
+      //
+      case 'save-bot':
+        await runBotCommands(medplum, argv, ['save']);
+        break;
+      case 'deploy-bot':
+        await runBotCommands(medplum, argv, ['save', 'deploy']);
+        break;
+      default:
+        console.log(`Unknown command: ${command}`);
+    }
+  } catch (err) {
+    console.error('Error: ' + normalizeErrorString(err));
+  }
+}
+
+async function startLogin(medplum: MedplumClient): Promise<void> {
+  await startWebServer(medplum);
+
+  const loginUrl = new URL('/oauth2/authorize', baseUrl);
+  loginUrl.searchParams.set('client_id', clientId);
+  loginUrl.searchParams.set('redirect_uri', redirectUri);
+  loginUrl.searchParams.set('scope', 'openid');
+  loginUrl.searchParams.set('response_type', 'code');
+  await openBrowser(loginUrl.toString());
+}
+
+async function startWebServer(medplum: MedplumClient): Promise<void> {
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url as string, 'http://localhost:9615');
+    const code = url.searchParams.get('code');
+    if (url.pathname === '/' && code) {
+      try {
+        const profile = await medplum.processCode(code, { clientId, redirectUri });
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end(`Signed in as ${getDisplayString(profile)}. You may close this window.`);
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end(`Error: ${normalizeErrorString(err)}`);
+      } finally {
+        server.close();
+      }
+    } else {
+      res.writeHead(404, { 'Content-Type': 'text/plain' });
+      res.end('Not found');
+    }
+  }).listen(9615);
+}
+
+/**
+ * Opens a web browser to the specified URL.
+ * See: https://hasinthaindrajee.medium.com/browser-sso-for-cli-applications-b0be743fa656
+ * @param url The URL to open.
+ */
+async function openBrowser(url: string): Promise<void> {
+  const os = platform();
+  let cmd = undefined;
+  switch (os) {
+    case 'openbsd':
+    case 'linux':
+      cmd = `xdg-open '${url}'`;
+      break;
+    case 'darwin':
+      cmd = `open '${url}'`;
+      break;
+    case 'win32':
+      cmd = `cmd /c start "" "${url}"`;
+      break;
+    default:
+      throw new Error('Unsupported platform: ' + os);
+  }
+  exec(cmd);
+}
+
+/**
+ * Prints the current user and project.
+ * @param medplum The Medplum client.
+ */
+function printMe(medplum: MedplumClient): void {
+  const loginState = medplum.getActiveLogin();
+  if (loginState) {
+    console.log(`Profile: ${loginState.profile?.display} (${loginState.profile?.reference})`);
+    console.log(`Project: ${loginState.project?.display} (${loginState.project?.reference})`);
+  } else {
+    console.log('Not logged in');
+  }
+}
+
+function cleanUrl(input: string): string {
+  const knownPrefixes = ['admin/', 'auth/', 'fhir/R4'];
+  if (knownPrefixes.some((p) => input.startsWith(p))) {
+    // If the URL starts with a known prefix, return it as-is
+    return input;
+  }
+  // Otherwise, default to FHIR
+  return 'fhir/R4/' + input;
+}
+
+function parseBody(input: string | undefined): any {
+  if (!input) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(input);
+  } catch (err) {
+    return input;
+  }
+}
+
+function prettyPrint(input: unknown): void {
+  console.log(JSON.stringify(input, null, 2));
 }
 
 async function runBotCommands(medplum: MedplumClient, argv: string[], commands: string[]): Promise<void> {
@@ -125,9 +273,6 @@ function readFileContents(fileName: string): string | undefined {
 
 if (require.main === module) {
   dotenv.config();
-  const medplum = new MedplumClient({ fetch, baseUrl: process.env['MEDPLUM_BASE_URL'] });
-  medplum
-    .startClientLogin(process.env['MEDPLUM_CLIENT_ID'] as string, process.env['MEDPLUM_CLIENT_SECRET'] as string)
-    .then(() => main(medplum, process.argv))
-    .catch((err) => console.error('Unhandled error:', err));
+  const medplum = new MedplumClient({ fetch, baseUrl, storage: new FileSystemStorage() });
+  main(medplum, process.argv).catch((err) => console.error('Unhandled error:', err));
 }

@@ -1,36 +1,29 @@
-import { createReference, getReferenceString, ProfileResource } from '@medplum/core';
-import { Attachment, Patient, Reference, Resource } from '@medplum/fhirtypes';
-import React from 'react';
+import { createReference, MedplumClient, ProfileResource } from '@medplum/core';
+import { Attachment, Patient, Reference, ResourceType } from '@medplum/fhirtypes';
+import React, { useCallback } from 'react';
 import { ResourceTimeline } from '../ResourceTimeline/ResourceTimeline';
 
 export interface PatientTimelineProps {
   patient: Patient | Reference<Patient>;
 }
 
-const searches = [
-  '$/_history',
-  'Communication?subject=$',
-  'Device?patient=$',
-  'DeviceRequest?patient=$',
-  'DiagnosticReport?subject=$',
-  'Media?subject=$',
-  'ServiceRequest?subject=$',
-];
-
 export function PatientTimeline(props: PatientTimelineProps): JSX.Element {
+  const loadTimelineResources = useCallback((medplum: MedplumClient, _resourceType: ResourceType, id: string) => {
+    return Promise.allSettled([
+      medplum.readHistory('Patient', id),
+      medplum.search('Communication', 'subject=Patient/' + id),
+      medplum.search('Device', 'patient=Patient/' + id),
+      medplum.search('DeviceRequest', 'patient=Patient/' + id),
+      medplum.search('DiagnosticReport', 'subject=Patient/' + id),
+      medplum.search('Media', 'subject=Patient/' + id),
+      medplum.search('ServiceRequest', 'subject=Patient/' + id),
+    ]);
+  }, []);
+
   return (
     <ResourceTimeline
       value={props.patient}
-      buildSearchRequests={(resource: Resource) => ({
-        resourceType: 'Bundle',
-        type: 'batch',
-        entry: searches.map((search) => ({
-          request: {
-            method: 'GET',
-            url: search.replaceAll('$', getReferenceString(resource)),
-          },
-        })),
-      })}
+      loadTimelineResources={loadTimelineResources}
       createCommunication={(resource: Patient, sender: ProfileResource, text: string) => ({
         resourceType: 'Communication',
         status: 'completed',

@@ -58,6 +58,11 @@ export interface ProjectMembership {
   project?: Reference<Project>;
 
   /**
+   * The project administrator who invited the user to the project.
+   */
+  invitedBy?: Reference<User>;
+
+  /**
    * User that is granted access to the project.
    */
   user?: Reference<Bot | ClientApplication | User>;
@@ -74,6 +79,11 @@ export interface ProjectMembership {
   accessPolicy?: Reference<AccessPolicy>;
 
   /**
+   * Extended access configuration using parameterized access policies.
+   */
+  access?: ProjectMembershipAccess[];
+
+  /**
    * The user configuration for the user within the project memebership
    * such as menu links, saved searches, and features.
    */
@@ -83,4 +93,44 @@ export interface ProjectMembership {
    * Whether this user is a project administrator.
    */
   admin?: boolean;
+}
+
+/**
+ * Extended access configuration using parameterized access policies.
+ */
+export interface ProjectMembershipAccess {
+
+  /**
+   * The base access policy used as a template.  Variables in the template
+   * access policy are replaced by the values in the parameter.
+   */
+  policy?: Reference<AccessPolicy>;
+
+  /**
+   * User options that control the display of the application.
+   */
+  parameter?: ProjectMembershipAccessParameter[];
+}
+
+/**
+ * User options that control the display of the application.
+ */
+export interface ProjectMembershipAccessParameter {
+
+  /**
+   * The unique name of the parameter.
+   */
+  name?: string;
+
+  /**
+   * Value of the parameter - must be one of a constrained set of the data
+   * types (see [Extensibility](extensibility.html) for a list).
+   */
+  valueString?: string;
+
+  /**
+   * Value of the parameter - must be one of a constrained set of the data
+   * types (see [Extensibility](extensibility.html) for a list).
+   */
+  valueReference?: Reference;
 }

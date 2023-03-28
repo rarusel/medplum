@@ -1,5 +1,5 @@
 import { badRequest, Operator } from '@medplum/core';
-import { ClientApplication, Project, ResourceType, User } from '@medplum/fhirtypes';
+import { Project, ResourceType, User } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import { Request, Response } from 'express';
 import { body, validationResult } from 'express-validator';
@@ -8,7 +8,8 @@ import { URL } from 'url';
 import { getConfig } from '../config';
 import { invalidRequest, sendOutcome } from '../fhir/outcomes';
 import { systemRepo } from '../fhir/repo';
-import { getUserByEmail, GoogleCredentialClaims, tryLogin } from '../oauth/utils';
+import { getClient, getUserByEmail, GoogleCredentialClaims, tryLogin } from '../oauth/utils';
+import { isExternalAuth } from './method';
 import { sendLoginResult } from './utils';
 
 /*
@@ -79,7 +80,7 @@ export async function googleHandler(req: Request, res: Response): Promise<void> 
   // For OAuth2 flow, check the clientId
   const clientId = req.body.clientId;
   if (clientId) {
-    const client = await systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+    const client = await getClient(clientId);
     const clientProjectId = client.meta?.project as string;
     if (projectId !== undefined && projectId !== clientProjectId) {
       sendOutcome(res, badRequest('Invalid projectId'));
@@ -105,6 +106,12 @@ export async function googleHandler(req: Request, res: Response): Promise<void> 
   }
 
   const claims = result.payload as GoogleCredentialClaims;
+
+  const externalAuth = await isExternalAuth(claims.email);
+  if (externalAuth) {
+    res.status(200).json(externalAuth);
+    return;
+  }
 
   const existingUser = await getUserByEmail(claims.email, projectId);
   if (!existingUser) {

@@ -19,7 +19,7 @@ import { sendOutcome } from '../outcomes';
 import { Repository, systemRepo } from '../repo';
 import { isBotEnabled } from './execute';
 
-const LAMBDA_RUNTIME = 'nodejs16.x';
+const LAMBDA_RUNTIME = 'nodejs18.x';
 
 const LAMBDA_HANDLER = 'index.handler';
 
@@ -106,7 +106,7 @@ export const deployHandler = asyncWrap(async (req: Request, res: Response) => {
     return;
   }
 
-  const client = new LambdaClient({ region: 'us-east-1' });
+  const client = new LambdaClient({ region: getConfig().awsRegion });
   const name = `medplum-bot-lambda-${bot.id}`;
 
   // By default, use the code on the bot

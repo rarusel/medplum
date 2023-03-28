@@ -1,5 +1,5 @@
 import { InvokeCommand, LambdaClient } from '@aws-sdk/client-lambda';
-import { badRequest, createReference, Hl7Message, resolveId } from '@medplum/core';
+import { badRequest, createReference, getIdentifier, Hl7Message, resolveId } from '@medplum/core';
 import { AuditEvent, Bot, Login, Organization, Project, ProjectMembership, Reference } from '@medplum/fhirtypes';
 import { Request, Response } from 'express';
 import { TextDecoder, TextEncoder } from 'util';
@@ -110,6 +110,7 @@ export async function isBotEnabled(bot: Bot): Promise<boolean> {
  */
 async function runInLambda(request: BotExecutionRequest): Promise<BotExecutionResult> {
   const { bot, runAs, input, contentType } = request;
+  const config = getConfig();
 
   // Create the Login resource
   const login = await systemRepo.createResource<Login>({
@@ -134,10 +135,10 @@ async function runInLambda(request: BotExecutionRequest): Promise<BotExecutionRe
   const project = await systemRepo.readResource<Project>('Project', bot.meta?.project as string);
   const secrets = Object.fromEntries(project.secret?.map((secret) => [secret.name, secret]) || []);
 
-  const client = new LambdaClient({ region: 'us-east-1' });
-  const name = `medplum-bot-lambda-${bot.id}`;
+  const client = new LambdaClient({ region: config.awsRegion });
+  const name = getLambdaFunctionName(bot);
   const payload = {
-    baseUrl: getConfig().baseUrl,
+    baseUrl: config.baseUrl,
     accessToken,
     input: input instanceof Hl7Message ? input.toString() : input,
     contentType,
@@ -169,6 +170,25 @@ async function runInLambda(request: BotExecutionRequest): Promise<BotExecutionRe
       logResult: (err as Error).message,
     };
   }
+}
+
+/**
+ * Returns the AWS Lambda function name for the given bot.
+ * By default, the function name is based on the bot ID.
+ * If the bot has a custom function, and the server allows it, then that is used instead.
+ * @param bot The Bot resource.
+ * @returns The AWS Lambda function name.
+ */
+export function getLambdaFunctionName(bot: Bot): string {
+  if (getConfig().botCustomFunctionsEnabled) {
+    const customFunction = getIdentifier(bot, 'https://medplum.com/bot-external-function-id');
+    if (customFunction) {
+      return customFunction;
+    }
+  }
+
+  // By default, use the bot ID as the Lambda function name
+  return `medplum-bot-lambda-${bot.id}`;
 }
 
 /**

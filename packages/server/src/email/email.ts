@@ -15,6 +15,7 @@ import { logger } from '../logger';
  * @param options The MailComposer options.
  */
 export async function sendEmail(options: Mail.Options): Promise<void> {
+  const sesClient = new SESv2Client({ region: getConfig().awsRegion });
   const fromAddress = getConfig().supportEmail;
   const toAddresses = buildAddresses(options.to);
   const ccAddresses = buildAddresses(options.cc);

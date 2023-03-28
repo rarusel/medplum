@@ -33,7 +33,7 @@ export async function resetPasswordHandler(req: Request, res: Response): Promise
     filters: [
       {
         code: 'email',
-        operator: Operator.EQUALS,
+        operator: Operator.EXACT,
         value: req.body.email,
       },
     ],

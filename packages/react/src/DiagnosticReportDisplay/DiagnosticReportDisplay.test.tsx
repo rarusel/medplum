@@ -12,6 +12,7 @@ const syntheaReport: DiagnosticReport = {
   resourceType: 'DiagnosticReport',
   id: 'e508a0f9-17f1-49a9-8151-0e21cb19098f',
   status: 'final',
+  specimen: HomerDiagnosticReport.specimen,
   category: [
     {
       coding: [
@@ -115,6 +116,18 @@ describe('DiagnosticReportDisplay', () => {
     expect(screen.getByText('Hello world')).toBeDefined();
   });
 
+  test('Renders performer', async () => {
+    const obs = await medplum.createResource(CreatinineObservation);
+    ExampleReport.result = [createReference(obs)];
+    await medplum.updateResource(ExampleReport);
+    await act(async () => {
+      setup({ value: ExampleReport });
+    });
+
+    expect(screen.getByText('Test Organization')).not.toBeNull();
+    expect(screen.getByText('Alice Smith')).not.toBeNull();
+  });
+
   test('Renders observation category', async () => {
     const obs = await medplum.createResource(CreatinineObservation);
     ExampleReport.result = [createReference(obs)];
@@ -124,5 +137,50 @@ describe('DiagnosticReportDisplay', () => {
     });
     expect(screen.getByText('Diagnostic Report')).toBeDefined();
     expect(screen.getByText('Day 2')).toBeDefined();
+  });
+
+  test('Renders observation note', async () => {
+    const obs = await medplum.createResource(CreatinineObservation);
+    ExampleReport.result = [createReference(obs)];
+    await medplum.updateResource(ExampleReport);
+    await act(async () => {
+      setup({ value: ExampleReport });
+    });
+    expect(screen.getByText('Previously reported as 167 mg/dL on 2/3/2023, 8:40:14 PM')).not.toBeNull();
+  });
+
+  test('Hide observation note', async () => {
+    const obs = await medplum.createResource(CreatinineObservation);
+    ExampleReport.result = [createReference(obs)];
+    await medplum.updateResource(ExampleReport);
+    await act(async () => {
+      setup({ value: ExampleReport, hideObservationNotes: true });
+    });
+    expect(screen.queryByText('Previously reported as 167 mg/dL on 2/3/2023, 8:40:14 PM')).toBeNull();
+  });
+
+  test('Renders specimen note', async () => {
+    await act(async () => {
+      setup({ value: syntheaReport });
+    });
+
+    expect(screen.queryByText('Specimen hemolyzed. Results may be affected.')).not.toBeNull();
+    expect(screen.queryByText('Specimen lipemic. Results may be affected.')).not.toBeNull();
+  });
+
+  test('Renders specimen collected time', async () => {
+    await act(async () => {
+      setup({ value: syntheaReport });
+    });
+
+    expect(screen.queryByText('Collected:')).not.toBeNull();
+  });
+
+  test('Renders hide specimen info', async () => {
+    await act(async () => {
+      setup({ value: syntheaReport, hideSpecimenInfo: true });
+    });
+
+    expect(screen.queryByText('Collected:')).toBeNull();
   });
 });

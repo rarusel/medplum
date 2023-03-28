@@ -1,14 +1,14 @@
 import {
   getSearchParameterDetails,
   globalSchema,
-  indexStructureDefinition,
-  isLowerCase,
+  indexStructureDefinitionBundle,
+  isResourceTypeSchema,
   SearchParameterDetails,
   SearchParameterType,
   TypeSchema,
 } from '@medplum/core';
 import { readJson } from '@medplum/definitions';
-import { Bundle, BundleEntry, Resource } from '@medplum/fhirtypes';
+import { Bundle } from '@medplum/fhirtypes';
 import { writeFileSync } from 'fs';
 import { resolve } from 'path';
 import { FileBuilder } from './filebuilder';
@@ -17,35 +17,17 @@ const searchParams = readJson('fhir/r4/search-parameters.json');
 const builder = new FileBuilder();
 
 export function main(): void {
-  buildStructureDefinitions('profiles-types.json');
-  buildStructureDefinitions('profiles-resources.json');
-  buildStructureDefinitions('profiles-medplum.json');
+  indexStructureDefinitionBundle(readJson('fhir/r4/profiles-types.json') as Bundle);
+  indexStructureDefinitionBundle(readJson('fhir/r4/profiles-resources.json') as Bundle);
+  indexStructureDefinitionBundle(readJson('fhir/r4/profiles-medplum.json') as Bundle);
   writeMigrations();
-}
-
-function buildStructureDefinitions(fileName: string): void {
-  const resourceDefinitions = readJson(`fhir/r4/${fileName}`) as Bundle;
-  for (const entry of resourceDefinitions.entry as BundleEntry[]) {
-    const resource = entry.resource as Resource;
-    if (
-      resource.resourceType === 'StructureDefinition' &&
-      resource.name &&
-      resource.name !== 'Resource' &&
-      resource.name !== 'BackboneElement' &&
-      resource.name !== 'DomainResource' &&
-      resource.name !== 'MetadataResource' &&
-      !isLowerCase(resource.name[0])
-    ) {
-      indexStructureDefinition(resource);
-    }
-  }
 }
 
 function writeMigrations(): void {
   const b = new FileBuilder();
   buildMigrationUp(b);
   // writeFileSync(resolve(__dirname, '../../server/src/migrations/init.ts'), b.toString(), 'utf8');
-  writeFileSync(resolve(__dirname, '../../server/src/migrations/v28.ts'), builder.toString(), 'utf8');
+  writeFileSync(resolve(__dirname, '../../server/src/migrations/v30.ts'), builder.toString(), 'utf8');
 }
 
 function buildMigrationUp(b: FileBuilder): void {
@@ -75,25 +57,8 @@ function buildMigrationUp(b: FileBuilder): void {
   builder.append('}');
 }
 
-function isResourceType(typeSchema: TypeSchema): boolean {
-  if (typeSchema.parentType || !typeSchema.properties) {
-    return false;
-  }
-  for (const propertyName of ['id', 'meta', 'implicitRules', 'language']) {
-    if (!(propertyName in typeSchema.properties)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 function buildCreateTables(b: FileBuilder, resourceType: string, fhirType: TypeSchema): void {
-  if (resourceType === 'Resource' || resourceType === 'DomainResource') {
-    // Don't create tables for base types
-    return;
-  }
-
-  if (!isResourceType(fhirType)) {
+  if (!isResourceTypeSchema(fhirType)) {
     // Don't create a table if fhirType is a subtype or not a resource type
     return;
   }
@@ -104,6 +69,9 @@ function buildCreateTables(b: FileBuilder, resourceType: string, fhirType: TypeS
     '"lastUpdated" TIMESTAMP WITH TIME ZONE NOT NULL',
     '"deleted" BOOLEAN NOT NULL DEFAULT FALSE',
     '"compartments" UUID[] NOT NULL',
+    '"_source" TEXT[]',
+    '"_tag" TEXT[]',
+    '"_profile" TEXT[]',
   ];
 
   columns.push(...buildSearchColumns(resourceType));
@@ -155,21 +123,16 @@ function buildCreateTables(b: FileBuilder, resourceType: string, fhirType: TypeS
   b.append(`await client.query('CREATE INDEX ON "${resourceType}_Token" ("value")');`);
   b.newLine();
 
-  builder.append('await client.query(`CREATE TABLE IF NOT EXISTS "' + resourceType + '_Token" (');
-  builder.indentCount++;
-  builder.append('"resourceId" UUID NOT NULL,');
-  builder.append('"index" INTEGER NOT NULL,');
-  builder.append('"code" TEXT NOT NULL,');
-  builder.append('"system" TEXT,');
-  builder.append('"value" TEXT');
-  builder.indentCount--;
-  builder.append(')`);');
+  builder.append(`await client.query('ALTER TABLE "${resourceType}" ADD COLUMN "_profile" TEXT[]');`);
+  builder.append(`await client.query('ALTER TABLE "${resourceType}" ADD COLUMN "_security" TEXT[]');`);
+  builder.append(`await client.query('ALTER TABLE "${resourceType}" ADD COLUMN "_source" TEXT');`);
+  builder.append(`await client.query('ALTER TABLE "${resourceType}" ADD COLUMN "_tag" TEXT[]');`);
   builder.newLine();
 
-  builder.append(`await client.query('CREATE INDEX ON "${resourceType}_Token" ("resourceId")');`);
-  builder.append(`await client.query('CREATE INDEX ON "${resourceType}_Token" ("code")');`);
-  builder.append(`await client.query('CREATE INDEX ON "${resourceType}_Token" ("system")');`);
-  builder.append(`await client.query('CREATE INDEX ON "${resourceType}_Token" ("value")');`);
+  builder.append(`await client.query('CREATE INDEX ON "${resourceType}" USING GIN("_profile")');`);
+  builder.append(`await client.query('CREATE INDEX ON "${resourceType}" USING GIN("_security")');`);
+  builder.append(`await client.query('CREATE INDEX ON "${resourceType}" ("_source")');`);
+  builder.append(`await client.query('CREATE INDEX ON "${resourceType}" USING GIN("_tag")');`);
   builder.newLine();
 }
 
@@ -188,18 +151,6 @@ function buildSearchColumns(resourceType: string): string[] {
     const columnName = details.columnName;
     const newColumnType = getColumnType(details);
     result.push(`"${columnName}" ${newColumnType}`);
-
-    if (searchParam.type === 'date' && details.type === SearchParameterType.DATETIME) {
-      if (details.array) {
-        builder.append(
-          `await client.query('ALTER TABLE "${resourceType}" ALTER COLUMN "${columnName}" TYPE ${newColumnType} USING \\'{}\\'::TIMESTAMP WITH TIME ZONE[]');`
-        );
-      } else {
-        builder.append(
-          `await client.query('ALTER TABLE "${resourceType}" ALTER COLUMN "${columnName}" TYPE ${newColumnType} USING NULL');`
-        );
-      }
-    }
   }
   return result;
 }

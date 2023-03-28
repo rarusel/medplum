@@ -1,11 +1,11 @@
-import { Bundle, Patient, SearchParameter, StructureDefinition } from '@medplum/fhirtypes';
+import { Bundle, BundleEntry, Patient, SearchParameter, StructureDefinition } from '@medplum/fhirtypes';
 import { webcrypto } from 'crypto';
 import PdfPrinter from 'pdfmake';
 import type { CustomTableLayout, TDocumentDefinitions, TFontDictionary } from 'pdfmake/interfaces';
-import { URLSearchParams } from 'url';
 import { TextEncoder } from 'util';
 import { MedplumClient, NewPatientRequest, NewProjectRequest, NewUserRequest } from './client';
-import { ProfileResource, stringify } from './utils';
+import { getStatus, notFound, OperationOutcomeError } from './outcomes';
+import { createReference, ProfileResource, stringify } from './utils';
 
 const defaultOptions = {
   clientId: 'xyz',
@@ -59,7 +59,17 @@ let tokenExpired = false;
 
 function mockFetch(url: string, options: any): Promise<any> {
   const { method } = options;
+  const response = mockHandler(method, url, options);
+  response.status = response.status || 200;
+  return Promise.resolve({
+    ok: response.status === 200 || response.status === undefined,
+    status: response.status,
+    blob: () => Promise.resolve(response),
+    json: () => Promise.resolve(response),
+  });
+}
 
+function mockHandler(method: string, url: string, options: any): any {
   let result: any;
 
   if (method === 'POST' && url.endsWith('auth/login')) {
@@ -103,6 +113,18 @@ function mockFetch(url: string, options: any): Promise<any> {
     result = {
       resourceType: 'Patient',
       id: '123',
+    };
+  } else if (method === 'GET' && url.endsWith('Patient')) {
+    result = {
+      resourceType: 'Bundle',
+      entry: [
+        {
+          resource: {
+            resourceType: 'Patient',
+            id: '123',
+          },
+        },
+      ],
     };
   } else if (method === 'GET' && url.endsWith('Patient/not-found')) {
     result = { status: 404 };
@@ -168,25 +190,43 @@ function mockFetch(url: string, options: any): Promise<any> {
     };
   } else if (method === 'POST' && url.endsWith('fhir/R4/$graphql')) {
     result = schemaResponse;
-  } else if (method === 'POST' && options.headers['Content-Type'] === 'application/fhir+json') {
+  } else if (method === 'POST' && url.endsWith('fhir/R4')) {
+    result = mockFhirBatchHandler(method, url, options);
+  } else if (method === 'POST' && options?.headers?.['Content-Type'] === 'application/fhir+json') {
     // Default "create" operation returns the body
     result = JSON.parse(options.body);
+  } else {
+    result = notFound;
   }
 
-  const response: any = {
+  return {
     request: {
       url,
       options,
     },
     ...result,
   };
+}
 
-  return Promise.resolve({
-    ok: response.status === 200 || response.status === undefined,
-    status: response.status,
-    blob: () => Promise.resolve(response),
-    json: () => Promise.resolve(response),
-  });
+function mockFhirBatchHandler(_method: string, _path: string, options: any): Bundle {
+  const { body } = options;
+  const request = JSON.parse(body) as Bundle;
+  return {
+    resourceType: 'Bundle',
+    type: 'batch-response',
+    entry: request.entry?.map((e: BundleEntry) => {
+      const url = 'fhir/R4/' + e?.request?.url;
+      const method = e?.request?.method as string;
+      const resource = mockHandler(method, url, null);
+      if (resource?.resourceType === 'OperationOutcome') {
+        return { resource, response: { status: getStatus(resource).toString(), outcome: resource } };
+      } else if (resource) {
+        return { resource, response: { status: '200' } };
+      } else {
+        return { resource: notFound, response: { status: '404' } };
+      }
+    }),
+  };
 }
 
 describe('Client', () => {
@@ -310,10 +350,9 @@ describe('Client', () => {
   test('SignInWithRedirect', async () => {
     // Mock window.location.assign
     global.window = Object.create(window);
+    const assign = jest.fn();
     Object.defineProperty(window, 'location', {
-      value: {
-        assign: jest.fn(),
-      },
+      value: { assign },
       writable: true,
     });
 
@@ -322,6 +361,7 @@ describe('Client', () => {
     // First, test the initial reidrect
     const result1 = await client.signInWithRedirect();
     expect(result1).toBeUndefined();
+    expect(assign).toBeCalledWith(expect.stringMatching(/authorize\?.+scope=/));
 
     // Mock response code
     Object.defineProperty(window, 'location', {
@@ -350,6 +390,40 @@ describe('Client', () => {
     const client = new MedplumClient(defaultOptions);
     client.signOutWithRedirect();
     expect(window.location.assign).toBeCalled();
+  });
+
+  test('Sign in with external auth', async () => {
+    global.window = Object.create(window);
+    const assign = jest.fn();
+    Object.defineProperty(window, 'location', {
+      value: { assign },
+      writable: true,
+    });
+
+    const client = new MedplumClient(defaultOptions);
+    const result = await client.signInWithExternalAuth(
+      'https://auth.example.com/authorize',
+      'external-client-123',
+      'https://me.example.com',
+      {
+        clientId: 'medplum-client-123',
+      }
+    );
+    expect(result).toBeUndefined();
+    expect(assign).toBeCalledWith(expect.stringMatching(/authorize\?.+scope=/));
+  });
+
+  test('Get external auth redirect URI', async () => {
+    const client = new MedplumClient(defaultOptions);
+    const result = client.getExternalAuthRedirectUri(
+      'https://auth.example.com/authorize',
+      'external-client-123',
+      'https://me.example.com',
+      {
+        clientId: 'medplum-client-123',
+      }
+    );
+    expect(result).toMatch(/https:\/\/auth\.example\.com\/authorize\?.+scope=/);
   });
 
   test('New project success', async () => {
@@ -820,12 +894,21 @@ describe('Client', () => {
 
   test('Get cached schema', async () => {
     const client = new MedplumClient(defaultOptions);
-    const schema = await client.requestSchema('Patient');
-    expect(schema).toBeDefined();
-    expect(schema.types['Patient']).toBeDefined();
 
-    const schema2 = await client.requestSchema('Patient');
-    expect(schema2).toEqual(schema);
+    // Issue two requests simultaneously
+    const request1 = client.requestSchema('Patient');
+    const request2 = client.requestSchema('Patient');
+
+    const schema1 = await request1;
+    expect(schema1).toBeDefined();
+    expect(schema1.types['Patient']).toBeDefined();
+
+    const schema2 = await request2;
+    expect(schema2).toBeDefined();
+    expect(schema2).toEqual(schema1);
+
+    const schema3 = await client.requestSchema('Patient');
+    expect(schema3).toEqual(schema1);
   });
 
   test('Search', async () => {
@@ -833,7 +916,7 @@ describe('Client', () => {
     const result = await client.search('Patient', 'name:contains=alice');
     expect(result).toBeDefined();
     expect((result as any).request.options.method).toBe('GET');
-    expect((result as any).request.url).toBe('https://x/fhir/R4/Patient?name:contains=alice');
+    expect((result as any).request.url).toBe('https://x/fhir/R4/Patient?name%3Acontains=alice');
   });
 
   test('Search no filters', async () => {
@@ -872,6 +955,15 @@ describe('Client', () => {
     expect(result[0].resourceType).toBe('Patient');
   });
 
+  test('Search resources with record of params', async () => {
+    const client = new MedplumClient(defaultOptions);
+    const result = await client.searchResources('Patient', { _count: 1, 'name:contains': 'alice' });
+    expect(result).toBeDefined();
+    expect(Array.isArray(result)).toBe(true);
+    expect(result.length).toBe(1);
+    expect(result[0].resourceType).toBe('Patient');
+  });
+
   test('Search resources ReadablePromise', async () => {
     const client = new MedplumClient(defaultOptions);
     const promise1 = client.searchResources('Patient', '_count=1&name:contains=alice');
@@ -883,6 +975,13 @@ describe('Client', () => {
     expect(result).toBeDefined();
     expect(result.length).toBe(1);
     expect(result[0].resourceType).toBe('Patient');
+  });
+
+  test('Search and cache', async () => {
+    const client = new MedplumClient(defaultOptions);
+    const result = await client.search('Patient');
+    expect(result).toBeDefined();
+    expect(client.getCachedReference(createReference(result.entry?.[0]?.resource as Patient))).toBeDefined();
   });
 
   test('Search ValueSet', async () => {
@@ -982,6 +1081,7 @@ describe('Client', () => {
 
   test('setAccessToken', async () => {
     const fetch = jest.fn(async () => ({
+      status: 200,
       json: async () => ({ resourceType: 'Patient' }),
     }));
 
@@ -1041,6 +1141,76 @@ test('graphql variables', async () => {
   expect(body.variables).toBeDefined();
 });
 
+test('Auto batch single request', async () => {
+  const medplum = new MedplumClient({ ...defaultOptions, autoBatchTime: 100 });
+  const patient = await medplum.readResource('Patient', '123');
+  expect(patient).toBeDefined();
+});
+
+test('Auto batch multiple requests', async () => {
+  const medplum = new MedplumClient({ ...defaultOptions, autoBatchTime: 100 });
+
+  // Start two requests at the same time
+  const patientPromise = medplum.readResource('Patient', '123');
+  const practitionerPromise = medplum.readResource('Practitioner', '123');
+
+  // Wait for the batch to be sent
+  const patient = await patientPromise;
+  const practitioner = await practitionerPromise;
+
+  expect(patient).toBeDefined();
+  expect(practitioner).toBeDefined();
+});
+
+test('Auto batch error', async () => {
+  const medplum = new MedplumClient({ ...defaultOptions, autoBatchTime: 100 });
+  try {
+    // Start multiple requests to force a batch
+    const patientPromise = medplum.readResource('Patient', '123');
+    await medplum.readResource('Patient', '9999999-does-not-exist');
+    await patientPromise;
+    throw new Error('Expected error');
+  } catch (err) {
+    expect((err as OperationOutcomeError).outcome).toMatchObject(notFound);
+  }
+});
+
+test('Retry on 500', async () => {
+  let count = 0;
+
+  const fetch = jest.fn(async () => {
+    if (count === 0) {
+      count++;
+      return { status: 500 };
+    }
+    return {
+      status: 200,
+      json: async () => ({ resourceType: 'Patient' }),
+    };
+  });
+
+  const client = new MedplumClient({ fetch });
+  const patient = await client.readResource('Patient', '123');
+  expect(patient).toBeDefined();
+  expect(fetch).toHaveBeenCalledTimes(2);
+});
+
+test('Log non-JSON response', async () => {
+  const fetch = jest.fn(async () => ({
+    status: 200,
+    json: () => Promise.reject(new Error('Not JSON')),
+  }));
+  console.error = jest.fn();
+  const client = new MedplumClient({ fetch });
+  try {
+    await client.readResource('Patient', '123');
+    fail('Expected error');
+  } catch (err) {
+    expect(err).toBeDefined();
+  }
+  expect(console.error).toHaveBeenCalledTimes(1);
+});
+
 function createPdf(
   docDefinition: TDocumentDefinitions,
   tableLayouts?: { [name: string]: CustomTableLayout },
@@ -1055,6 +1225,10 @@ function createPdf(
     pdfDoc.on('error', reject);
     pdfDoc.end();
   });
+}
+
+function fail(message: string): never {
+  throw new Error(message);
 }
 
 const fonts: TFontDictionary = {

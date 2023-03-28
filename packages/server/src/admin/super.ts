@@ -1,11 +1,10 @@
-import { allOk, badRequest, forbidden } from '@medplum/core';
+import { allOk, badRequest, forbidden, validateResourceType } from '@medplum/core';
 import { Request, Response, Router } from 'express';
 import { body, validationResult } from 'express-validator';
 import { asyncWrap } from '../async';
 import { setPassword } from '../auth/setpassword';
 import { invalidRequest, sendOutcome } from '../fhir/outcomes';
-import { systemRepo } from '../fhir/repo';
-import { validateResourceType } from '../fhir/schema';
+import { Repository, systemRepo } from '../fhir/repo';
 import { logger } from '../logger';
 import { authenticateToken } from '../oauth/middleware';
 import { getUserByEmail } from '../oauth/utils';
@@ -89,6 +88,31 @@ superAdminRouter.post(
   })
 );
 
+// POST to /admin/super/compartments
+// to rebuild compartments for a resource type.
+// Run this after major changes to how compartments are constructed.
+superAdminRouter.post(
+  '/compartments',
+  asyncWrap(async (req: Request, res: Response) => {
+    if (!res.locals.login.superAdmin) {
+      sendOutcome(res, forbidden);
+      return;
+    }
+
+    const resourceType = req.body.resourceType;
+    validateResourceType(resourceType);
+
+    // Start reindex in the background
+    // This can take a long time, so we don't want to block the response
+    systemRepo
+      .rebuildCompartmentsForResourceType(resourceType)
+      .then(() => logger.info(`Rebuilding compartments for ${resourceType} completed`))
+      .catch((err) => logger.error(`Rebuilding compartments for ${resourceType} failed: ${err}`));
+
+    sendOutcome(res, allOk);
+  })
+);
+
 // POST to /admin/super/setpassword
 // to force set a User password.
 superAdminRouter.post(
@@ -116,6 +140,32 @@ superAdminRouter.post(
     }
 
     await setPassword(user, req.body.password as string);
+    sendOutcome(res, allOk);
+  })
+);
+
+// POST to /admin/super/purge
+// to clean up old system generated resources.
+superAdminRouter.post(
+  '/purge',
+  [
+    body('resourceType').isIn(['AuditEvent', 'Login']).withMessage('Invalid resource type'),
+    body('before').isISO8601().withMessage('Invalid before date'),
+  ],
+  asyncWrap(async (req: Request, res: Response) => {
+    if (!res.locals.login.superAdmin) {
+      sendOutcome(res, forbidden);
+      return;
+    }
+
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      sendOutcome(res, invalidRequest(errors));
+      return;
+    }
+
+    const repo = res.locals.repo as Repository;
+    await repo.purgeResources(req.body.resourceType, req.body.before);
     sendOutcome(res, allOk);
   })
 );

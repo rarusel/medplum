@@ -1,7 +1,8 @@
 import { Anchor, TextProps } from '@mantine/core';
+import { isReference, isResource } from '@medplum/core';
 import { Reference, Resource } from '@medplum/fhirtypes';
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useMedplumNavigate } from '../MedplumProvider/MedplumProvider';
 import { killEvent } from '../utils/dom';
 
 export interface MedplumLinkProps extends TextProps {
@@ -13,7 +14,7 @@ export interface MedplumLinkProps extends TextProps {
 }
 
 export function MedplumLink(props: MedplumLinkProps): JSX.Element {
-  const navigate = useNavigate();
+  const navigate = useMedplumNavigate();
   const { to, suffix, label, onClick, children, ...rest } = props;
 
   let href = getHref(to);
@@ -44,9 +45,9 @@ function getHref(to: Resource | Reference | string | undefined): string {
   if (to) {
     if (typeof to === 'string') {
       return getStringHref(to);
-    } else if ('resourceType' in to) {
+    } else if (isResource(to)) {
       return getResourceHref(to);
-    } else if ('reference' in to) {
+    } else if (isReference(to)) {
       return getReferenceHref(to);
     }
   }

@@ -1,6 +1,6 @@
 import { ActionIcon, Center, createStyles, Group, Loader, Menu, ScrollArea, TextInput } from '@mantine/core';
 import { showNotification, updateNotification } from '@mantine/notifications';
-import { getReferenceString, normalizeErrorString, ProfileResource } from '@medplum/core';
+import { getReferenceString, MedplumClient, normalizeErrorString, ProfileResource } from '@medplum/core';
 import {
   Attachment,
   AuditEvent,
@@ -11,6 +11,7 @@ import {
   Media,
   Reference,
   Resource,
+  ResourceType,
 } from '@medplum/fhirtypes';
 import {
   IconCheck,
@@ -22,14 +23,13 @@ import {
   IconPin,
   IconPinnedOff,
   IconTrash,
-} from '@tabler/icons';
+} from '@tabler/icons-react';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { AttachmentButton } from '../AttachmentButton/AttachmentButton';
 import { AttachmentDisplay } from '../AttachmentDisplay/AttachmentDisplay';
 import { DiagnosticReportDisplay } from '../DiagnosticReportDisplay/DiagnosticReportDisplay';
 import { Form } from '../Form/Form';
-import { useMedplum } from '../MedplumProvider/MedplumProvider';
+import { useMedplum, useMedplumNavigate } from '../MedplumProvider/MedplumProvider';
 import { Panel } from '../Panel/Panel';
 import { ResourceAvatar } from '../ResourceAvatar/ResourceAvatar';
 import { ResourceDiffTable } from '../ResourceDiffTable/ResourceDiffTable';
@@ -46,82 +46,108 @@ const useStyles = createStyles((theme) => ({
 
 export interface ResourceTimelineProps<T extends Resource> {
   value: T | Reference<T>;
-  buildSearchRequests: (resource: T) => Bundle;
+  loadTimelineResources: (
+    medplum: MedplumClient,
+    resourceType: ResourceType,
+    id: string
+  ) => Promise<PromiseSettledResult<Bundle>[]>;
   createCommunication?: (resource: T, sender: ProfileResource, text: string) => Communication;
   createMedia?: (resource: T, operator: ProfileResource, attachment: Attachment) => Media;
 }
 
 export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProps<T>): JSX.Element {
-  const navigate = useNavigate();
   const medplum = useMedplum();
+  const navigate = useMedplumNavigate();
   const sender = medplum.getProfile() as ProfileResource;
   const inputRef = useRef<HTMLInputElement>(null);
   const resource = useResource(props.value);
   const [history, setHistory] = useState<Bundle>();
   const [items, setItems] = useState<Resource[]>([]);
-  const buildSearchRequests = props.buildSearchRequests;
+  const loadTimelineResources = props.loadTimelineResources;
 
   const itemsRef = useRef<Resource[]>(items);
   itemsRef.current = items;
 
-  const loadTimeline = useCallback(() => {
-    if (!resource) {
-      setItems([]);
-      setHistory({} as Bundle);
-      return;
-    }
-    medplum.executeBatch(buildSearchRequests(resource)).then(handleBatchResponse).catch(console.log);
-  }, [medplum, resource, buildSearchRequests]);
-
-  useEffect(() => {
-    loadTimeline();
-  }, [loadTimeline]);
+  /**
+   * Sorts and sets the items.
+   *
+   * Sorting is primarily a function of meta.lastUpdated, but there are special cases.
+   * When displaying connected resources, for example a Communication in the context of an Encounter,
+   * the Communication.sent time is used rather than Communication.meta.lastUpdated.
+   *
+   * Other examples of special cases:
+   * - DiagnosticReport.issued
+   * - Media.issued
+   * - Observation.issued
+   * - DocumentReference.date
+   *
+   * See "sortByDateAndPriority()" for more details.
+   */
+  const sortAndSetItems = useCallback(
+    (newItmes: Resource[]): void => {
+      sortByDateAndPriority(newItmes, resource);
+      newItmes.reverse();
+      setItems(newItmes);
+    },
+    [resource]
+  );
 
   /**
    * Handles a batch request response.
    * @param batchResponse The batch response.
    */
-  function handleBatchResponse(batchResponse: Bundle): void {
-    const newItems = [];
+  const handleBatchResponse = useCallback(
+    (batchResponse: PromiseSettledResult<Bundle>[]): void => {
+      const newItems = [];
 
-    if (batchResponse.entry) {
-      for (const batchEntry of batchResponse.entry) {
-        const bundle = batchEntry.resource as Bundle;
-        if (!bundle) {
+      for (const settledResult of batchResponse) {
+        if (settledResult.status !== 'fulfilled') {
           // User may not have access to all resource types
           continue;
         }
 
+        const bundle = settledResult.value;
         if (bundle.type === 'history') {
           setHistory(bundle);
         }
 
         if (bundle.entry) {
           for (const entry of bundle.entry) {
-            if (entry.resource) {
-              newItems.push(entry.resource);
-            }
+            newItems.push(entry.resource as Resource);
           }
         }
       }
 
-      sortByDateAndPriority(newItems);
-      newItems.reverse();
-    }
-
-    setItems(newItems);
-  }
+      sortAndSetItems(newItems);
+    },
+    [sortAndSetItems]
+  );
 
   /**
    * Adds an array of resources to the timeline.
-   * @param resources Array of resources.
+   * @param resource Resource to add.
    */
-  function addResources(resources: Resource[]): void {
-    const newItems = [...itemsRef.current, ...resources];
-    sortByDateAndPriority(newItems);
-    newItems.reverse();
-    setItems(newItems);
-  }
+  const addResource = useCallback(
+    (resource: Resource): void => sortAndSetItems([...itemsRef.current, resource]),
+    [sortAndSetItems]
+  );
+
+  /**
+   * Loads the timeline.
+   */
+  const loadTimeline = useCallback(() => {
+    let resourceType: ResourceType;
+    let id: string;
+    if ('resourceType' in props.value) {
+      resourceType = props.value.resourceType;
+      id = props.value.id as string;
+    } else {
+      [resourceType, id] = props.value.reference?.split('/') as [ResourceType, string];
+    }
+    loadTimelineResources(medplum, resourceType, id).then(handleBatchResponse).catch(console.log);
+  }, [medplum, props.value, loadTimelineResources, handleBatchResponse]);
+
+  useEffect(() => loadTimeline(), [loadTimeline]);
 
   /**
    * Adds a Communication resource to the timeline.
@@ -134,9 +160,7 @@ export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProp
     }
     medplum
       .createResource(props.createCommunication(resource, sender, contentString))
-      .then((result) => {
-        addResources([result]);
-      })
+      .then((result) => addResource(result))
       .catch(console.log);
   }
 
@@ -151,7 +175,7 @@ export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProp
     }
     medplum
       .createResource(props.createMedia(resource, sender, attachment))
-      .then((result) => addResources([result]))
+      .then((result) => addResource(result))
       .then(() =>
         updateNotification({
           id: 'upload-notification',
@@ -212,7 +236,7 @@ export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProp
       title: 'Initializing upload...',
       message: 'Please wait...',
       autoClose: false,
-      disallowClose: true,
+      withCloseButton: false,
     });
   }
 
@@ -223,7 +247,7 @@ export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProp
       title: 'Uploading...',
       message: getProgressMessage(e),
       autoClose: false,
-      disallowClose: true,
+      withCloseButton: false,
     });
   }
 
@@ -278,17 +302,21 @@ export function ResourceTimeline<T extends Resource>(props: ResourceTimelineProp
         </Panel>
       )}
       {items.map((item) => {
+        if (!item) {
+          // TODO: Handle null history items for deleted versions.
+          return null;
+        }
+        const key = `${item.resourceType}/${item.id}/${item.meta?.versionId}`;
         if (item.resourceType === resource.resourceType && item.id === resource.id) {
           return (
             <HistoryTimelineItem
-              key={item.meta?.versionId}
+              key={key}
               history={history as Bundle<Resource>}
               resource={item}
               onDetails={onVersionDetails}
             />
           );
         }
-        const key = `${item.resourceType}/${item.id}`;
         switch (item.resourceType) {
           case 'AuditEvent':
             return <AuditEventTimelineItem key={key} resource={item} onDetails={onDetails} />;
@@ -413,7 +441,7 @@ function HistoryTimelineItem(props: HistoryTimelineItemProps): JSX.Element {
     return (
       <TimelineItem resource={props.resource} padding={true} popupMenuItems={<TimelineItemPopupMenu {...props} />}>
         <h3>Created</h3>
-        <ResourceTable value={props.resource} ignoreMissingValues={true} />
+        <ResourceTable value={props.resource} ignoreMissingValues forceUseInput />
       </TimelineItem>
     );
   }
@@ -486,7 +514,7 @@ function getProgressMessage(e: ProgressEvent): string {
 }
 
 function formatFileSize(bytes: number): string {
-  if (bytes == 0) {
+  if (bytes === 0) {
     return '0.00 B';
   }
   const e = Math.floor(Math.log(bytes) / Math.log(1024));

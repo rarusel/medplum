@@ -1,5 +1,7 @@
-import { Button, Group, TextInput, Title } from '@mantine/core';
-import { AccessPolicy, OperationOutcome, Reference } from '@medplum/fhirtypes';
+import { Button, Group, List, Stack, Text, TextInput, Title } from '@mantine/core';
+import { showNotification } from '@mantine/notifications';
+import { normalizeErrorString, normalizeOperationOutcome } from '@medplum/core';
+import { AccessPolicy, Bot, OperationOutcome, Reference } from '@medplum/fhirtypes';
 import { Form, FormSection, getErrorsForInput, MedplumLink, useMedplum } from '@medplum/react';
 import React, { useState } from 'react';
 import { getProjectId } from '../utils';
@@ -12,7 +14,7 @@ export function CreateBotPage(): JSX.Element {
   const [description, setDescription] = useState<string>('');
   const [accessPolicy, setAccessPolicy] = useState<Reference<AccessPolicy>>();
   const [outcome, setOutcome] = useState<OperationOutcome>();
-  const [success, setSuccess] = useState(false);
+  const [bot, setBot] = useState<Bot | undefined>(undefined);
 
   return (
     <>
@@ -26,13 +28,20 @@ export function CreateBotPage(): JSX.Element {
           };
           medplum
             .post('admin/projects/' + projectId + '/bot', body)
-            .then(() => medplum.get(`admin/projects/${projectId}`, { cache: 'reload' }))
-            .then(() => setSuccess(true))
-            .catch(setOutcome);
+            .then((result: Bot) => {
+              medplum.invalidateSearches('Bot');
+              medplum.invalidateSearches('ProjectMembership');
+              setBot(result);
+              showNotification({ color: 'green', message: 'Bot created' });
+            })
+            .catch((err) => {
+              showNotification({ color: 'red', message: normalizeErrorString(err) });
+              setOutcome(normalizeOperationOutcome(err));
+            });
         }}
       >
-        {!success && (
-          <>
+        {!bot && (
+          <Stack>
             <FormSection title="Name" htmlFor="name" outcome={outcome}>
               <TextInput
                 id="name"
@@ -57,14 +66,19 @@ export function CreateBotPage(): JSX.Element {
             <Group position="right">
               <Button type="submit">Create Bot</Button>
             </Group>
-          </>
+          </Stack>
         )}
-        {success && (
+        {bot && (
           <div data-testid="success">
-            <p>Bot created</p>
-            <p>
-              Click <MedplumLink to="/admin/project">here</MedplumLink> to return to the project admin page.
-            </p>
+            <Text>Bot created</Text>
+            <List>
+              <List.Item>
+                <MedplumLink to={bot}>Go to new bot</MedplumLink>
+              </List.Item>
+              <List.Item>
+                <MedplumLink to="/admin/bots">Back to bots list</MedplumLink>
+              </List.Item>
+            </List>
           </div>
         )}
       </Form>

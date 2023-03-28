@@ -1,5 +1,5 @@
-import { createReference, getReferenceString, ProfileResource } from '@medplum/core';
-import { Attachment, Group, Patient, Reference, Resource, ServiceRequest } from '@medplum/fhirtypes';
+import { createReference, MedplumClient, ProfileResource } from '@medplum/core';
+import { Attachment, Group, Patient, Reference, ResourceType, ServiceRequest } from '@medplum/fhirtypes';
 import React from 'react';
 import { ResourceTimeline } from '../ResourceTimeline/ResourceTimeline';
 
@@ -11,36 +11,14 @@ export function ServiceRequestTimeline(props: ServiceRequestTimelineProps): JSX.
   return (
     <ResourceTimeline
       value={props.serviceRequest}
-      buildSearchRequests={(resource: Resource) => ({
-        resourceType: 'Bundle',
-        type: 'batch',
-        entry: [
-          {
-            request: {
-              method: 'GET',
-              url: `${getReferenceString(resource)}/_history`,
-            },
-          },
-          {
-            request: {
-              method: 'GET',
-              url: `Communication?based-on=${getReferenceString(resource)}&_sort=-_lastUpdated`,
-            },
-          },
-          {
-            request: {
-              method: 'GET',
-              url: `Media?_count=100&based-on=${getReferenceString(resource)}&_sort=-_lastUpdated`,
-            },
-          },
-          {
-            request: {
-              method: 'GET',
-              url: `DiagnosticReport?based-on=${getReferenceString(resource)}&_sort=-_lastUpdated`,
-            },
-          },
-        ],
-      })}
+      loadTimelineResources={async (medplum: MedplumClient, _resourceType: ResourceType, id: string) => {
+        return Promise.allSettled([
+          medplum.readHistory('ServiceRequest', id),
+          medplum.search('Communication', 'based-on=ServiceRequest/' + id),
+          medplum.search('Media', '_count=100&based-on=ServiceRequest/' + id),
+          medplum.search('DiagnosticReport', 'based-on=ServiceRequest/' + id),
+        ]);
+      }}
       createCommunication={(resource: ServiceRequest, sender: ProfileResource, text: string) => ({
         resourceType: 'Communication',
         status: 'completed',

@@ -1,9 +1,8 @@
-import { OperationOutcomeError } from '@medplum/core';
+import { checkForNull, createStructureIssue, OperationOutcomeError, validationError } from '@medplum/core';
 import { readJson } from '@medplum/definitions';
 import { OperationOutcomeIssue, Resource } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import { JSONSchema4, JSONSchema6 } from 'json-schema';
-import { checkForNull, createStructureIssue, validationError } from './utils';
 
 /*
  * This file contains helper methods for using fhir.schema.json,
@@ -40,17 +39,17 @@ export function getJsonSchemaResourceTypes(): string[] {
 
 export function validateResourceWithJsonSchema<T extends Resource>(resource: T): void {
   if (!resource) {
-    throw validationError('Resource is null');
+    throw new OperationOutcomeError(validationError('Resource is null'));
   }
 
   const resourceType = resource.resourceType;
   if (!resourceType) {
-    throw validationError('Missing resource type');
+    throw new OperationOutcomeError(validationError('Missing resource type'));
   }
 
   const definition = getJsonSchemaDefinitions()[resourceType];
   if (!definition) {
-    throw validationError('Unknown resource type');
+    throw new OperationOutcomeError(validationError('Unknown resource type'));
   }
 
   const issues: OperationOutcomeIssue[] = [];

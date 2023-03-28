@@ -27,7 +27,7 @@ import {
   IconFilter,
   IconTableExport,
   IconTrash,
-} from '@tabler/icons';
+} from '@tabler/icons-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { Container } from '../Container/Container';
 import { useMedplum } from '../MedplumProvider/MedplumProvider';
@@ -120,7 +120,7 @@ const useStyles = createStyles((theme) => ({
 
   control: {
     width: '100%',
-    padding: `${theme.spacing.xs}px ${theme.spacing.md}px`,
+    padding: `${theme.spacing.xs} ${theme.spacing.md}`,
 
     '&:hover': {
       backgroundColor: theme.colorScheme === 'dark' ? theme.colors.dark[6] : theme.colors.gray[0],
@@ -461,7 +461,7 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
       </Table>
       {resources?.length === 0 && (
         <Container>
-          <Center>
+          <Center style={{ height: 150 }}>
             <Text size="xl" color="dimmed">
               No results
             </Text>
@@ -471,17 +471,17 @@ export function SearchControl(props: SearchControlProps): JSX.Element {
       {lastResult?.total !== undefined && lastResult.total > 0 && (
         <Center m="md" p="md">
           <Pagination
-            page={getPage(search)}
+            value={getPage(search)}
             total={getTotalPages(search, lastResult.total)}
             onChange={(newPage) => emitSearchChange(setPage(search, newPage))}
-            getItemAriaLabel={(page) => {
-              switch (page) {
-                case 'prev':
-                  return 'Previous page';
+            getControlProps={(control) => {
+              switch (control) {
+                case 'previous':
+                  return { 'aria-label': 'Previous page' };
                 case 'next':
-                  return 'Next page';
+                  return { 'aria-label': 'Next page' };
                 default:
-                  return undefined;
+                  return {};
               }
             }}
           />

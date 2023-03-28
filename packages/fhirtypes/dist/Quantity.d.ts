@@ -6,7 +6,10 @@
 import { Extension } from './Extension';
 
 /**
- * The comparator is not used on a SimpleQuantity
+ * A measured amount (or an amount that can potentially be measured).
+ * Note that measured amounts include amounts that are not precisely
+ * quantified, including amounts involving arbitrary units and floating
+ * currencies.
  */
 export interface Quantity {
 
@@ -33,7 +36,10 @@ export interface Quantity {
   value?: number;
 
   /**
-   * Not allowed to be used in this context
+   * How the value should be understood and represented - whether the
+   * actual value is greater or less than the stated value due to
+   * measurement issues; e.g. if the comparator is &quot;&lt;&quot; , then the real
+   * value is &lt; stated value.
    */
   comparator?: '<' | '<=' | '>=' | '>';
 

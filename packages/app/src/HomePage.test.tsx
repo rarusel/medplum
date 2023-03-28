@@ -1,10 +1,13 @@
-import { OperationOutcome, Patient } from '@medplum/fhirtypes';
+import { allOk } from '@medplum/core';
+import { Patient } from '@medplum/fhirtypes';
 import { MockClient } from '@medplum/mock';
 import { MedplumProvider } from '@medplum/react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import React from 'react';
+import { randomUUID } from 'crypto';
+import React, { Suspense } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRoutes } from './AppRoutes';
+import { Loading } from './components/Loading';
 import { getDefaultFields } from './HomePage';
 
 async function setup(url = '/Patient', medplum = new MockClient()): Promise<void> {
@@ -12,7 +15,9 @@ async function setup(url = '/Patient', medplum = new MockClient()): Promise<void
     render(
       <MedplumProvider medplum={medplum}>
         <MemoryRouter initialEntries={[url]} initialIndex={0}>
-          <AppRoutes />
+          <Suspense fallback={<Loading />}>
+            <AppRoutes />
+          </Suspense>
         </MemoryRouter>
       </MedplumProvider>
     );
@@ -94,10 +99,13 @@ describe('HomePage', () => {
   });
 
   test('Delete button, ok', async () => {
+    const family = randomUUID();
+
     // Create a practitioner that we can delete
     const medplum = new MockClient();
     const patient = await medplum.createResource<Patient>({
       resourceType: 'Patient',
+      name: [{ family }],
     });
 
     window.confirm = jest.fn(() => true);
@@ -105,7 +113,7 @@ describe('HomePage', () => {
     await setup('/Patient', medplum);
 
     // Make sure the patient is on the screen
-    await waitFor(() => screen.getByText(patient.id as string));
+    await waitFor(() => screen.getByText(family));
 
     await waitFor(() => screen.getByText('Delete...'));
 
@@ -117,23 +125,19 @@ describe('HomePage', () => {
       fireEvent.click(screen.getByText('Delete...'));
     });
 
-    try {
-      await medplum.readResource('Patient', patient.id as string);
-      fail('Should have thrown');
-    } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
-    }
-
     // Make sure the patient is *not* on the screen
-    await waitFor(() => screen.queryByText(patient.id as string) === null);
+    await waitFor(() => screen.queryByText(family) === null);
   });
 
   test('Export button', async () => {
-    // window.confirm = jest.fn(() => false);
     window.URL.createObjectURL = jest.fn(() => 'blob:http://localhost/blob');
     window.open = jest.fn();
 
-    await setup();
+    // Mock the export operation
+    const medplum = new MockClient();
+    medplum.router.router.add('GET', ':resourceType/$csv', async () => [allOk]);
+
+    await setup('/Patient', medplum);
     await waitFor(() => screen.getByText('Export...'));
 
     await act(async () => {

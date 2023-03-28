@@ -1,31 +1,29 @@
-import { generateKeyPairSync } from 'crypto';
-import { URL } from 'url';
-import { Signer } from './signer';
+import { Binary } from '@medplum/fhirtypes';
+import { randomUUID } from 'crypto';
+import { loadTestConfig } from '../config';
+import { getPresignedUrl } from './signer';
 
 describe('Signer', () => {
+  beforeAll(async () => {
+    jest.useFakeTimers();
+    await loadTestConfig();
+  });
+
+  afterAll(() => {
+    jest.useRealTimers();
+  });
+
   test('Presign URL', () => {
-    const keyId = 'xyz';
-    const passphrase = 'top secret';
+    jest.setSystemTime(new Date('2023-02-10T00:00:00.000Z'));
 
-    const { privateKey } = generateKeyPairSync('rsa', {
-      modulusLength: 4096,
-      publicKeyEncoding: {
-        type: 'spki',
-        format: 'pem',
+    const binary: Binary = {
+      resourceType: 'Binary',
+      id: randomUUID(),
+      meta: {
+        versionId: randomUUID(),
       },
-      privateKeyEncoding: {
-        type: 'pkcs8',
-        format: 'pem',
-        cipher: 'aes-256-cbc',
-        passphrase,
-      },
-    });
+    };
 
-    const signer = new Signer(keyId, privateKey, passphrase);
-    const result = signer.sign('https://example.com/test', new Date().getTime() / 1000 + 3600);
-    expect(result).toBeDefined();
-
-    const resultUrl = new URL(result);
-    expect(resultUrl.hostname).toBe('example.com');
+    expect(getPresignedUrl(binary)).toMatch(/\?Expires=1675990800&Key-Pair-Id=/);
   });
 });

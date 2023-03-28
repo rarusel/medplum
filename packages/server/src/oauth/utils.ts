@@ -4,11 +4,13 @@ import {
   Filter,
   getDateProperty,
   getReferenceString,
+  OperationOutcomeError,
   Operator,
   ProfileResource,
   resolveId,
 } from '@medplum/core';
 import {
+  AccessPolicy,
   BundleEntry,
   ClientApplication,
   Login,
@@ -23,13 +25,15 @@ import bcrypt from 'bcryptjs';
 import { timingSafeEqual } from 'crypto';
 import { JWTPayload } from 'jose';
 import { authenticator } from 'otplib';
+import { getAccessPolicyForLogin } from '../fhir/accesspolicy';
 import { systemRepo } from '../fhir/repo';
 import { AuditEventOutcome, logAuthEvent, LoginEvent } from '../util/auditevent';
 import { generateAccessToken, generateIdToken, generateRefreshToken, generateSecret } from './keys';
 
 export interface LoginRequest {
-  readonly email: string;
-  readonly authMethod: 'password' | 'google';
+  readonly email?: string;
+  readonly externalId?: string;
+  readonly authMethod: 'password' | 'google' | 'external' | 'exchange';
   readonly password?: string;
   readonly scope: string;
   readonly nonce: string;
@@ -83,22 +87,48 @@ export interface GoogleCredentialClaims extends JWTPayload {
   readonly picture: string;
 }
 
+/**
+ * Returns the client application by ID.
+ * Handles special cases for "built-in" clients.
+ * @param clientId The client ID.
+ * @returns The client application.
+ */
+export async function getClient(clientId: string): Promise<ClientApplication> {
+  if (clientId === 'medplum-cli') {
+    return {
+      resourceType: 'ClientApplication',
+      id: 'medplum-cli',
+      redirectUri: 'http://localhost:9615',
+      pkceOptional: true,
+    };
+  }
+  return systemRepo.readResource<ClientApplication>('ClientApplication', clientId);
+}
+
 export async function tryLogin(request: LoginRequest): Promise<Login> {
   validateLoginRequest(request);
 
   let client: ClientApplication | undefined;
   if (request.clientId) {
-    client = await systemRepo.readResource<ClientApplication>('ClientApplication', request.clientId);
+    client = await getClient(request.clientId);
   }
+
+  validatePkce(request, client);
 
   let launch: SmartAppLaunch | undefined;
   if (request.launchId) {
     launch = await systemRepo.readResource<SmartAppLaunch>('SmartAppLaunch', request.launchId);
   }
 
-  const user = await getUserByEmail(request.email, request.projectId);
+  let user: User | undefined = undefined;
+  if (request.externalId) {
+    user = await getUserByExternalId(request.externalId, request.projectId as string);
+  } else if (request.email) {
+    user = await getUserByEmail(request.email, request.projectId);
+  }
+
   if (!user) {
-    throw badRequest('Email or password is invalid');
+    throw new OperationOutcomeError(badRequest('User not found'));
   }
 
   await authenticate(request, user);
@@ -137,32 +167,47 @@ export async function tryLogin(request: LoginRequest): Promise<Login> {
 }
 
 export function validateLoginRequest(request: LoginRequest): void {
-  if (!request.email) {
-    throw badRequest('Invalid email', 'email');
+  if (request.authMethod === 'external' || request.authMethod === 'exchange') {
+    if (!request.externalId && !request.email) {
+      throw new OperationOutcomeError(badRequest('Missing email or externalId', 'externalId'));
+    }
+    if (request.externalId && !request.projectId) {
+      throw new OperationOutcomeError(badRequest('Project ID is required for external ID', 'projectId'));
+    }
+  } else {
+    if (!request.email) {
+      throw new OperationOutcomeError(badRequest('Invalid email', 'email'));
+    }
   }
 
   if (!request.authMethod) {
-    throw badRequest('Invalid authentication method', 'authMethod');
+    throw new OperationOutcomeError(badRequest('Invalid authentication method', 'authMethod'));
   }
 
   if (request.authMethod === 'password' && !request.password) {
-    throw badRequest('Invalid password', 'password');
+    throw new OperationOutcomeError(badRequest('Invalid password', 'password'));
   }
 
   if (request.authMethod === 'google' && !request.googleCredentials) {
-    throw badRequest('Invalid google credentials', 'googleCredentials');
+    throw new OperationOutcomeError(badRequest('Invalid google credentials', 'googleCredentials'));
   }
 
   if (!request.scope) {
-    throw badRequest('Invalid scope', 'scope');
+    throw new OperationOutcomeError(badRequest('Invalid scope', 'scope'));
+  }
+}
+
+export function validatePkce(request: LoginRequest, client: ClientApplication | undefined): void {
+  if (client?.pkceOptional) {
+    return;
   }
 
   if (!request.codeChallenge && request.codeChallengeMethod) {
-    throw badRequest('Invalid code challenge', 'code_challenge');
+    throw new OperationOutcomeError(badRequest('Invalid code challenge', 'code_challenge'));
   }
 
   if (request.codeChallenge && !request.codeChallengeMethod) {
-    throw badRequest('Invalid code challenge method', 'code_challenge_method');
+    throw new OperationOutcomeError(badRequest('Invalid code challenge method', 'code_challenge_method'));
   }
 
   if (
@@ -170,17 +215,15 @@ export function validateLoginRequest(request: LoginRequest): void {
     request.codeChallengeMethod !== 'plain' &&
     request.codeChallengeMethod !== 'S256'
   ) {
-    throw badRequest('Invalid code challenge method', 'code_challenge_method');
+    throw new OperationOutcomeError(badRequest('Invalid code challenge method', 'code_challenge_method'));
   }
-
-  return undefined;
 }
 
 async function authenticate(request: LoginRequest, user: User): Promise<void> {
   if (request.password && user.passwordHash) {
     const bcryptResult = await bcrypt.compare(request.password, user.passwordHash as string);
     if (!bcryptResult) {
-      throw badRequest('Email or password is invalid');
+      throw new OperationOutcomeError(badRequest('Email or password is invalid'));
     }
     return;
   }
@@ -190,7 +233,12 @@ async function authenticate(request: LoginRequest, user: User): Promise<void> {
     return;
   }
 
-  throw badRequest('Invalid authentication method');
+  if (request.authMethod === 'external' || request.authMethod === 'exchange') {
+    // Verified by external auth provider
+    return;
+  }
+
+  throw new OperationOutcomeError(badRequest('Invalid authentication method'));
 }
 
 /**
@@ -204,25 +252,25 @@ async function authenticate(request: LoginRequest, user: User): Promise<void> {
  */
 export async function verifyMfaToken(login: Login, token: string): Promise<Login> {
   if (login.revoked) {
-    throw badRequest('Login revoked');
+    throw new OperationOutcomeError(badRequest('Login revoked'));
   }
 
   if (login.granted) {
-    throw badRequest('Login granted');
+    throw new OperationOutcomeError(badRequest('Login granted'));
   }
 
   if (login.mfaVerified) {
-    throw badRequest('Login already verified');
+    throw new OperationOutcomeError(badRequest('Login already verified'));
   }
 
   const user = await systemRepo.readReference(login.user as Reference<User>);
   if (!user.mfaEnrolled) {
-    throw badRequest('User not enrolled in MFA');
+    throw new OperationOutcomeError(badRequest('User not enrolled in MFA'));
   }
 
   const secret = user.mfaSecret as string;
   if (!authenticator.check(token, secret)) {
-    throw badRequest('Invalid MFA token');
+    throw new OperationOutcomeError(badRequest('Invalid MFA token'));
   }
 
   return systemRepo.updateResource<Login>({
@@ -245,7 +293,7 @@ export async function getMembershipsForLogin(login: Login): Promise<ProjectMembe
   }
 
   if (!login.user?.reference) {
-    throw new Error('User reference is missing');
+    throw new OperationOutcomeError(badRequest('User reference is missing'));
   }
 
   const filters: Filter[] = [
@@ -314,15 +362,15 @@ export async function getClientApplicationMembership(
  */
 export async function setLoginMembership(login: Login, membershipId: string): Promise<Login> {
   if (login.revoked) {
-    throw badRequest('Login revoked');
+    throw new OperationOutcomeError(badRequest('Login revoked'));
   }
 
   if (login.granted) {
-    throw badRequest('Login granted');
+    throw new OperationOutcomeError(badRequest('Login granted'));
   }
 
   if (login.membership) {
-    throw badRequest('Login profile already set');
+    throw new OperationOutcomeError(badRequest('Login profile already set'));
   }
 
   // Find the membership for the user
@@ -330,10 +378,10 @@ export async function setLoginMembership(login: Login, membershipId: string): Pr
   try {
     membership = await systemRepo.readResource<ProjectMembership>('ProjectMembership', membershipId);
   } catch (err) {
-    throw badRequest('Profile not found');
+    throw new OperationOutcomeError(badRequest('Profile not found'));
   }
   if (membership.user?.reference !== login.user?.reference) {
-    throw badRequest('Invalid profile');
+    throw new OperationOutcomeError(badRequest('Invalid profile'));
   }
 
   // Get the project
@@ -341,8 +389,14 @@ export async function setLoginMembership(login: Login, membershipId: string): Pr
 
   // Make sure the membership satisfies the project requirements
   if (project.features?.includes('google-auth-required') && login.authMethod !== 'google') {
-    throw badRequest('Google authentication is required');
+    throw new OperationOutcomeError(badRequest('Google authentication is required'));
   }
+
+  // Get the access policy
+  const accessPolicy = await getAccessPolicyForLogin(login, membership);
+
+  // Check IP Access Rules
+  await checkIpAccessRules(login, accessPolicy);
 
   logAuthEvent(LoginEvent, project.id as string, membership.profile, login.remoteAddress, AuditEventOutcome.Success);
 
@@ -355,6 +409,40 @@ export async function setLoginMembership(login: Login, membershipId: string): Pr
 }
 
 /**
+ * Checks a login against the IP Access Rules for a project.
+ * Returns successfully if the login first matches an "allow" rule.
+ * Returns successfully if the login does not match any rules.
+ * Throws an error if the login matches a "block" rule.
+ * @param login The candidate login.
+ * @param accessPolicy The access policy for the login.
+ */
+async function checkIpAccessRules(login: Login, accessPolicy: AccessPolicy | undefined): Promise<void> {
+  if (!login.remoteAddress || !accessPolicy?.ipAccessRule) {
+    return;
+  }
+  for (const rule of accessPolicy.ipAccessRule) {
+    if (matchesIpAccessRule(login.remoteAddress, rule.value as string)) {
+      if (rule.action === 'allow') {
+        return;
+      }
+      if (rule.action === 'block') {
+        throw new OperationOutcomeError(badRequest('IP address not allowed'));
+      }
+    }
+  }
+}
+
+/**
+ * Returns true if the remote address matches the rule value.
+ * @param remoteAddress The login remote address.
+ * @param ruleValue The IP Access Rule value.
+ * @returns True if the remote address matches the rule value; otherwise false.
+ */
+function matchesIpAccessRule(remoteAddress: string, ruleValue: string): boolean {
+  return ruleValue === '*' || ruleValue === remoteAddress || remoteAddress.startsWith(ruleValue);
+}
+
+/**
  * Sets the login scope.
  * Ensures that the scope is the same or a subset of the originally requested scope.
  * @param login The login before the membership is set.
@@ -363,11 +451,11 @@ export async function setLoginMembership(login: Login, membershipId: string): Pr
  */
 export async function setLoginScope(login: Login, scope: string): Promise<Login> {
   if (login.revoked) {
-    throw badRequest('Login revoked');
+    throw new OperationOutcomeError(badRequest('Login revoked'));
   }
 
   if (login.granted) {
-    throw badRequest('Login granted');
+    throw new OperationOutcomeError(badRequest('Login granted'));
   }
 
   // Get existing scope
@@ -379,7 +467,7 @@ export async function setLoginScope(login: Login, scope: string): Promise<Login>
   // If user requests any scope that is not in existing scope, then reject
   for (const scope of submittedScopes) {
     if (!existingScopes.includes(scope)) {
-      throw badRequest('Invalid scope');
+      throw new OperationOutcomeError(badRequest('Invalid scope'));
     }
   }
 
@@ -394,11 +482,11 @@ export async function getAuthTokens(login: Login, profile: Reference<ProfileReso
   const clientId = login.client && resolveId(login.client);
   const userId = resolveId(login.user);
   if (!userId) {
-    throw badRequest('Login missing user');
+    throw new OperationOutcomeError(badRequest('Login missing user'));
   }
 
   if (!login.membership) {
-    throw badRequest('Login missing profile');
+    throw new OperationOutcomeError(badRequest('Login missing profile'));
   }
 
   if (!login.granted) {
@@ -450,6 +538,32 @@ export async function revokeLogin(login: Login): Promise<void> {
 }
 
 /**
+ * Searches for a user by externalId and project.
+ * External ID users are explicitly associated with the project.
+ * @param externalId The external ID.
+ * @param projectId The project ID.
+ * @returns The user if found; otherwise, undefined.
+ */
+export async function getUserByExternalId(externalId: string, projectId: string): Promise<User | undefined> {
+  const bundle = await systemRepo.search({
+    resourceType: 'User',
+    filters: [
+      {
+        code: 'external-id',
+        operator: Operator.EXACT,
+        value: externalId,
+      },
+      {
+        code: 'project',
+        operator: Operator.EQUALS,
+        value: 'Project/' + projectId,
+      },
+    ],
+  });
+  return bundle.entry && bundle.entry.length > 0 ? (bundle.entry[0].resource as User) : undefined;
+}
+
+/**
  * Searches for user by email.
  * @param email The email string.
  * @param projectId Optional project ID.
@@ -479,7 +593,7 @@ export async function getUserByEmailInProject(email: string, projectId: string):
     filters: [
       {
         code: 'email',
-        operator: Operator.EQUALS,
+        operator: Operator.EXACT,
         value: email,
       },
       {
@@ -504,7 +618,7 @@ export async function getUserByEmailWithoutProject(email: string): Promise<User 
     filters: [
       {
         code: 'email',
-        operator: Operator.EQUALS,
+        operator: Operator.EXACT,
         value: email,
       },
       {

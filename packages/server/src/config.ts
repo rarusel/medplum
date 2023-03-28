@@ -3,7 +3,7 @@ import { GetParametersByPathCommand, SSMClient } from '@aws-sdk/client-ssm';
 import { readFileSync } from 'fs';
 import { resolve } from 'path';
 
-const AWS_REGION = 'us-east-1';
+const DEFAULT_AWS_REGION = 'us-east-1';
 
 export interface MedplumServerConfig {
   port: number;
@@ -26,11 +26,13 @@ export interface MedplumServerConfig {
   googleClientSecret?: string;
   recaptchaSiteKey?: string;
   recaptchaSecretKey?: string;
-  adminClientId?: string;
   maxJsonSize: string;
   allowedOrigins?: string;
+  awsRegion: string;
   botLambdaRoleArn: string;
   botLambdaLayerName: string;
+  botCustomFunctionsEnabled?: boolean;
+  logAuditEvents?: boolean;
 }
 
 /**
@@ -73,7 +75,7 @@ export function getConfig(): MedplumServerConfig {
  * @returns The loaded configuration.
  */
 export async function loadConfig(configName: string): Promise<MedplumServerConfig> {
-  const [configType, configPath] = configName.split(':', 2);
+  const [configType, configPath] = splitOnce(configName, ':');
   switch (configType) {
     case 'file':
       cachedConfig = await loadFileConfig(configPath);
@@ -84,6 +86,7 @@ export async function loadConfig(configName: string): Promise<MedplumServerConfi
     default:
       throw new Error('Unrecognized config type: ' + configType);
   }
+  cachedConfig = addDefaults(cachedConfig);
   return cachedConfig;
 }
 
@@ -120,7 +123,12 @@ async function loadFileConfig(path: string): Promise<MedplumServerConfig> {
  * @returns The loaded configuration.
  */
 async function loadAwsConfig(path: string): Promise<MedplumServerConfig> {
-  const client = new SSMClient({ region: AWS_REGION });
+  let region = DEFAULT_AWS_REGION;
+  if (path.includes(':')) {
+    [region, path] = splitOnce(path, ':');
+  }
+
+  const client = new SSMClient({ region });
   const config: Record<string, any> = {};
 
   let nextToken: string | undefined;
@@ -137,9 +145,9 @@ async function loadAwsConfig(path: string): Promise<MedplumServerConfig> {
         const key = (param.Name as string).replace(path, '');
         const value = param.Value as string;
         if (key === 'DatabaseSecrets') {
-          config['database'] = await loadAwsSecrets(value);
+          config['database'] = await loadAwsSecrets(region, value);
         } else if (key === 'RedisSecrets') {
-          config['redis'] = await loadAwsSecrets(value);
+          config['redis'] = await loadAwsSecrets(region, value);
         } else if (key === 'port') {
           config.port = parseInt(value);
         } else {
@@ -155,23 +163,41 @@ async function loadAwsConfig(path: string): Promise<MedplumServerConfig> {
 
 /**
  * Returns the AWS Database Secret data as a JSON map.
+ * @param region The AWS region.
  * @param secretId Secret ARN
  * @returns The secret data as a JSON map.
  */
-async function loadAwsSecrets(secretId: string): Promise<Record<string, any> | undefined> {
-  const client = new SecretsManagerClient({
-    region: AWS_REGION,
-  });
-
-  const result = await client.send(
-    new GetSecretValueCommand({
-      SecretId: secretId,
-    })
-  );
+async function loadAwsSecrets(region: string, secretId: string): Promise<Record<string, any> | undefined> {
+  const client = new SecretsManagerClient({ region });
+  const result = await client.send(new GetSecretValueCommand({ SecretId: secretId }));
 
   if (!result.SecretString) {
     return undefined;
   }
 
   return JSON.parse(result.SecretString);
+}
+
+/**
+ * Adds default values to the config.
+ * @param config The input config as loaded from the config file.
+ * @returns The config with default values added.
+ */
+function addDefaults(config: MedplumServerConfig): MedplumServerConfig {
+  config.port = config.port || 8103;
+  config.issuer = config.issuer || config.baseUrl;
+  config.jwksUrl = config.jwksUrl || config.baseUrl + '/.well-known/jwks.json';
+  config.authorizeUrl = config.authorizeUrl || config.baseUrl + '/authorize';
+  config.tokenUrl = config.tokenUrl || config.baseUrl + '/token';
+  config.userInfoUrl = config.userInfoUrl || config.baseUrl + '/userinfo';
+  config.storageBaseUrl = config.storageBaseUrl || config.baseUrl + '/storage';
+  config.maxJsonSize = config.maxJsonSize || '1mb';
+  config.awsRegion = config.awsRegion || DEFAULT_AWS_REGION;
+  config.botLambdaLayerName = config.botLambdaLayerName || 'medplum-bot-layer';
+  return config;
+}
+
+function splitOnce(value: string, delimiter: string): [string, string] {
+  const index = value.indexOf(delimiter);
+  return [value.substring(0, index), value.substring(index + 1)];
 }

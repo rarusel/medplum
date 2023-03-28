@@ -1,8 +1,8 @@
-import { resolveId, unauthorized } from '@medplum/core';
-import { ClientApplication, Login, Project, ProjectMembership, Reference, User } from '@medplum/fhirtypes';
+import { OperationOutcomeError, unauthorized } from '@medplum/core';
+import { ClientApplication, Login, Project, ProjectMembership, Reference } from '@medplum/fhirtypes';
 import { NextFunction, Request, Response } from 'express';
-import { getRepoForLogin, systemRepo } from '../fhir/repo';
-import { logger } from '../logger';
+import { getRepoForLogin } from '../fhir/accesspolicy';
+import { systemRepo } from '../fhir/repo';
 import { MedplumAccessTokenClaims, verifyJwt } from './keys';
 import { getClientApplicationMembership, timingSafeEqualStr } from './utils';
 
@@ -13,7 +13,7 @@ export function authenticateToken(req: Request, res: Response, next: NextFunctio
 export async function authenticateTokenImpl(req: Request, res: Response): Promise<void> {
   const [tokenType, token] = req.headers.authorization?.split(' ') ?? [];
   if (!tokenType || !token) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 
   if (tokenType === 'Bearer') {
@@ -21,7 +21,7 @@ export async function authenticateTokenImpl(req: Request, res: Response): Promis
   } else if (tokenType === 'Basic') {
     await authenticateBasicAuth(req, res, token);
   } else {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 }
 
@@ -34,18 +34,18 @@ async function authenticateBearerToken(req: Request, res: Response, token: strin
     try {
       login = await systemRepo.readResource<Login>('Login', claims.login_id);
     } catch (err) {
-      throw unauthorized;
+      throw new OperationOutcomeError(unauthorized);
     }
 
     if (!login || !login.membership || login.revoked) {
-      throw unauthorized;
+      throw new OperationOutcomeError(unauthorized);
     }
 
     const membership = await systemRepo.readReference<ProjectMembership>(login.membership);
-    await setupLocals(req, res, login, membership);
+    const project = await systemRepo.readReference<Project>(membership.project as Reference<Project>);
+    await setupLocals(req, res, login, project, membership);
   } catch (err) {
-    logger.error('verify error', err);
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 }
 
@@ -53,7 +53,7 @@ async function authenticateBasicAuth(req: Request, res: Response, token: string)
   const credentials = Buffer.from(token, 'base64').toString('ascii');
   const [username, password] = credentials.split(':');
   if (!username || !password) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 
   let client = undefined;
@@ -61,37 +61,44 @@ async function authenticateBasicAuth(req: Request, res: Response, token: string)
   try {
     client = await systemRepo.readResource<ClientApplication>('ClientApplication', username);
   } catch (err) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 
   if (!client) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 
   if (!timingSafeEqualStr(client.secret as string, password)) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
-
-  const login: Login = {
-    resourceType: 'Login',
-    authMethod: 'client',
-  };
 
   const membership = await getClientApplicationMembership(client);
   if (!membership) {
-    throw unauthorized;
+    throw new OperationOutcomeError(unauthorized);
   }
 
-  await setupLocals(req, res, login, membership);
+  const project = await systemRepo.readReference<Project>(membership.project as Reference<Project>);
+  const login: Login = {
+    resourceType: 'Login',
+    authMethod: 'client',
+    superAdmin: project.superAdmin,
+  };
+
+  await setupLocals(req, res, login, project, membership);
 }
 
-async function setupLocals(req: Request, res: Response, login: Login, membership: ProjectMembership): Promise<void> {
+async function setupLocals(
+  req: Request,
+  res: Response,
+  login: Login,
+  project: Project,
+  membership: ProjectMembership
+): Promise<void> {
   const locals = res.locals;
   locals.login = login;
+  locals.project = project;
   locals.membership = membership;
-  locals.user = resolveId(membership.user as Reference<User>);
   locals.profile = membership.profile;
-  locals.project = await systemRepo.readReference(membership.project as Reference<Project>);
   locals.repo = await getRepoForLogin(
     login,
     membership,

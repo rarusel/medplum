@@ -7,17 +7,10 @@ import {
   NewPatientRequest,
   NewProjectRequest,
   NewUserRequest,
-  notFound,
+  OperationOutcomeError,
 } from '@medplum/core';
 import { readJson } from '@medplum/definitions';
-import {
-  Bundle,
-  CodeableConcept,
-  OperationOutcome,
-  Patient,
-  SearchParameter,
-  ServiceRequest,
-} from '@medplum/fhirtypes';
+import { Bundle, CodeableConcept, Patient, SearchParameter, ServiceRequest } from '@medplum/fhirtypes';
 import { randomUUID, webcrypto } from 'crypto';
 import { TextEncoder } from 'util';
 import { MockClient } from './client';
@@ -199,6 +192,7 @@ describe('MockClient', () => {
         'fhir/R4',
         JSON.stringify({
           resourceType: 'Bundle',
+          type: 'batch',
           entry: [
             {
               request: {
@@ -236,7 +230,6 @@ describe('MockClient', () => {
           },
         },
         {
-          resource: notFound,
           response: {
             status: '404',
           },
@@ -247,7 +240,7 @@ describe('MockClient', () => {
             name: [{ given: ['John'], family: 'Doe' }],
           },
           response: {
-            status: '200',
+            status: '201',
           },
         },
       ],
@@ -343,7 +336,8 @@ describe('MockClient', () => {
       await client.readResource('Patient', randomUUID());
       fail('Expected error');
     } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.id).toEqual('not-found');
     }
   });
 
@@ -362,7 +356,8 @@ describe('MockClient', () => {
       await client.readHistory('Patient', randomUUID());
       fail('Expected error');
     } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.id).toEqual('not-found');
     }
   });
 
@@ -384,7 +379,8 @@ describe('MockClient', () => {
       await client.readVersion('Patient', resource1.id as string, randomUUID());
       fail('Expected error');
     } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.id).toEqual('not-found');
     }
   });
 
@@ -420,6 +416,57 @@ describe('MockClient', () => {
     expect(resource2).toBeDefined();
     expect(resource2.id).toEqual(resource1.id);
     expect(resource2.meta?.versionId).not.toEqual(resource1.meta?.versionId);
+  });
+
+  test('Patch resource preserves original', async () => {
+    const client = new MockClient();
+
+    const resource1 = await client.createResource<Patient>({
+      resourceType: 'Patient',
+      name: [{ given: ['Homer'], family: 'Simpson' }],
+    });
+    expect(resource1).toBeDefined();
+
+    const resource2 = await client.patchResource('Patient', resource1.id as string, [
+      {
+        op: 'replace',
+        path: '/name/0/given/0',
+        value: 'Marge',
+      },
+    ]);
+    expect(resource2).toBeDefined();
+    expect(resource2.name?.[0].given?.[0]).toEqual('Marge');
+    expect(resource1.name?.[0].given?.[0]).toEqual('Homer');
+    expect(resource2.meta?.versionId).not.toEqual(resource1.meta?.versionId);
+  });
+
+  test('Patch resource errors', async () => {
+    const client = new MockClient();
+
+    const resource1 = await client.createResource<Patient>({
+      resourceType: 'Patient',
+      name: [{ given: ['Bart'], family: 'Simpson' }],
+    });
+    expect(resource1).toBeDefined();
+
+    try {
+      await client.patchResource('Patient', resource1.id as string, [
+        {
+          op: 'test',
+          path: '/name/0/given/0',
+          value: 'Homer',
+        },
+        {
+          op: 'replace',
+          path: '/name/0/given/0',
+          value: 'Marge',
+        },
+      ]);
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0].details?.text).toEqual('Test failed: Bart != Homer');
+    }
   });
 
   test('Preserve history', async () => {
@@ -465,7 +512,8 @@ describe('MockClient', () => {
       await client.readResource('Patient', resource1.id as string);
       fail('Should have thrown');
     } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.id).toEqual('not-found');
     }
   });
 
@@ -490,6 +538,116 @@ describe('MockClient', () => {
     );
     expect(slots.length).toBeGreaterThan(0);
   });
+
+  test('Identifier search', async () => {
+    const medplum = new MockClient();
+    // Create an original Patient with several identifiers
+    const patient1: Patient = await medplum.createResource({
+      resourceType: 'Patient',
+      identifier: [
+        {
+          type: {
+            coding: [
+              {
+                system: 'http://terminology.hl7.org/CodeSystem/v2-0203',
+                code: 'SS',
+                display: 'Social Security Number',
+              },
+            ],
+            text: 'Social Security Number',
+          },
+          system: 'http://hl7.org/fhir/sid/us-ssn',
+          value: '999-47-5984',
+        },
+        {
+          type: {
+            coding: [
+              {
+                system: 'http://terminology.hl7.org/CodeSystem/v2-0203',
+                code: 'DL',
+                display: "Driver's License",
+              },
+            ],
+            text: "Driver's License",
+          },
+          system: 'urn:oid:2.16.840.1.113883.4.3.25',
+          value: 'S99985931',
+        },
+      ],
+      birthDate: '1948-07-01',
+      name: [
+        {
+          family: 'Smith',
+          given: ['John'],
+        },
+      ],
+    });
+
+    expect(patient1).toBeDefined();
+
+    const existingPatients = await medplum.search('Patient', 'identifier=999-47-5984');
+    expect(existingPatients.total).toEqual(1);
+  });
+});
+
+test('Search one', async () => {
+  const medplum = new MockClient();
+  // Create an original Patient with several identifiers
+  const patient1: Patient = await medplum.createResource({
+    resourceType: 'Patient',
+    identifier: [
+      {
+        type: {
+          coding: [
+            {
+              system: 'http://terminology.hl7.org/CodeSystem/v2-0203',
+              code: 'SS',
+              display: 'Social Security Number',
+            },
+          ],
+          text: 'Social Security Number',
+        },
+        system: 'http://hl7.org/fhir/sid/us-ssn',
+        value: '999-47-5984',
+      },
+      {
+        type: {
+          coding: [
+            {
+              system: 'http://terminology.hl7.org/CodeSystem/v2-0203',
+              code: 'DL',
+              display: "Driver's License",
+            },
+          ],
+          text: "Driver's License",
+        },
+        system: 'urn:oid:2.16.840.1.113883.4.3.25',
+        value: 'S99985931',
+      },
+    ],
+    birthDate: '1948-07-01',
+    name: [
+      {
+        family: 'Smith',
+        given: ['John'],
+      },
+    ],
+  });
+
+  expect(patient1).toBeDefined();
+
+  const existingPatient = await medplum.searchOne('Patient', 'identifier=999-47-5984');
+  expect(existingPatient).toBeDefined();
+});
+
+test('Project admin', async () => {
+  const medplum = new MockClient();
+
+  const project = await medplum.get('admin/project/123');
+  expect(project).toBeDefined();
+
+  const membership = await medplum.get('admin/project/123/membership/456');
+  expect(membership).toBeDefined();
 });
 
 function fail(reason: string): never {

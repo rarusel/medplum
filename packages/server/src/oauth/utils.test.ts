@@ -1,9 +1,18 @@
-import { ClientApplication, OperationOutcome } from '@medplum/fhirtypes';
+import { OperationOutcomeError } from '@medplum/core';
+import { ClientApplication } from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
 import { initAppServices, shutdownApp } from '../app';
 import { loadTestConfig } from '../config';
 import { createTestClient } from '../test.setup';
-import { tryLogin, validateLoginRequest } from './utils';
+import {
+  getAuthTokens,
+  getClient,
+  getMembershipsForLogin,
+  tryLogin,
+  validateLoginRequest,
+  validatePkce,
+  verifyMfaToken,
+} from './utils';
 
 let client: ClientApplication;
 
@@ -31,7 +40,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toEqual('Not found');
     }
@@ -50,7 +59,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toEqual('Invalid email');
     }
@@ -69,7 +78,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toEqual('Invalid password');
     }
@@ -88,9 +97,9 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
-      expect(outcome.issue?.[0]?.details?.text).toEqual('Email or password is invalid');
+      expect(outcome.issue?.[0]?.details?.text).toEqual('User not found');
     }
   });
 
@@ -107,7 +116,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toBe('Invalid authentication method');
     }
@@ -125,7 +134,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toBe('Invalid authentication method');
     }
@@ -143,7 +152,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toBe('Invalid google credentials');
     }
@@ -162,7 +171,7 @@ describe('OAuth utils', () => {
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.severity).toEqual('error');
       expect(outcome.issue?.[0]?.details?.text).toBe('Invalid scope');
     }
@@ -181,22 +190,57 @@ describe('OAuth utils', () => {
     expect(login).toBeDefined();
   });
 
-  test('Missing codeChallengeMethod', () => {
-    // If user submits codeChallenge, then codeChallengeMethod is required
+  test('External auth without email or externalId', () => {
     try {
       validateLoginRequest({
-        clientId: client.id as string,
-        authMethod: 'password',
-        email: 'admin@example.com',
-        password: 'medplum_admin',
+        authMethod: 'external',
         scope: 'openid',
         nonce: 'nonce',
         remember: false,
-        codeChallenge: 'xyz',
+        projectId: randomUUID(),
       });
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Missing email or externalId');
+    }
+  });
+
+  test('External auth without projectId', () => {
+    try {
+      validateLoginRequest({
+        authMethod: 'external',
+        externalId: randomUUID(),
+        scope: 'openid',
+        nonce: 'nonce',
+        remember: false,
+      });
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Project ID is required for external ID');
+    }
+  });
+
+  test('Missing codeChallengeMethod', () => {
+    // If user submits codeChallenge, then codeChallengeMethod is required
+    try {
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+          codeChallenge: 'xyz',
+        },
+        undefined
+      );
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.expression?.[0]).toEqual('code_challenge_method');
     }
   });
@@ -204,72 +248,177 @@ describe('OAuth utils', () => {
   test('Missing codeChallenge', () => {
     // If user submits codeChallengeMethod, then codeChallenge is required
     try {
-      validateLoginRequest({
-        clientId: client.id as string,
-        authMethod: 'password',
-        email: 'admin@example.com',
-        password: 'medplum_admin',
-        scope: 'openid',
-        nonce: 'nonce',
-        remember: false,
-        codeChallengeMethod: 'plain',
-      });
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+          codeChallengeMethod: 'plain',
+        },
+        client
+      );
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.expression?.[0]).toEqual('code_challenge');
     }
   });
 
   test('Invalid codeChallengeMethod', () => {
     try {
-      validateLoginRequest({
-        clientId: client.id as string,
-        authMethod: 'password',
-        email: 'admin@example.com',
-        password: 'medplum_admin',
-        scope: 'openid',
-        nonce: 'nonce',
-        remember: false,
-        codeChallenge: 'xyz',
-        codeChallengeMethod: 'xyz',
-      });
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+          codeChallenge: 'xyz',
+          codeChallengeMethod: 'xyz',
+        },
+        client
+      );
       fail('Expected error');
     } catch (err) {
-      const outcome = err as OperationOutcome;
+      const outcome = (err as OperationOutcomeError).outcome;
       expect(outcome.issue?.[0]?.expression?.[0]).toEqual('code_challenge_method');
     }
   });
 
   test('Plain text code challenge method', () => {
     expect(() =>
-      validateLoginRequest({
-        clientId: client.id as string,
-        authMethod: 'password',
-        email: 'admin@example.com',
-        password: 'medplum_admin',
-        scope: 'openid',
-        nonce: 'nonce',
-        remember: false,
-        codeChallenge: 'xyz',
-        codeChallengeMethod: 'plain',
-      })
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+          codeChallenge: 'xyz',
+          codeChallengeMethod: 'plain',
+        },
+        client
+      )
     ).not.toThrow();
   });
 
   test('S256 code challenge method', () => {
     expect(() =>
-      validateLoginRequest({
-        clientId: client.id as string,
-        authMethod: 'password',
-        email: 'admin@example.com',
-        password: 'medplum_admin',
-        scope: 'openid',
-        nonce: 'nonce',
-        remember: false,
-        codeChallenge: 'xyz',
-        codeChallengeMethod: 'S256',
-      })
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+          codeChallenge: 'xyz',
+          codeChallengeMethod: 'S256',
+        },
+        client
+      )
     ).not.toThrow();
   });
+
+  test('Client application PKCE optional', () => {
+    const client: ClientApplication = {
+      resourceType: 'ClientApplication',
+      id: randomUUID(),
+      pkceOptional: true,
+    };
+
+    expect(() =>
+      validatePkce(
+        {
+          clientId: client.id as string,
+          authMethod: 'password',
+          email: 'admin@example.com',
+          password: 'medplum_admin',
+          scope: 'openid',
+          nonce: 'nonce',
+          remember: false,
+        },
+        client
+      )
+    ).not.toThrow();
+  });
+
+  test('verifyMfaToken login revoked', async () => {
+    try {
+      await verifyMfaToken({ resourceType: 'Login', revoked: true }, 'token');
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Login revoked');
+    }
+  });
+
+  test('verifyMfaToken login granted', async () => {
+    try {
+      await verifyMfaToken({ resourceType: 'Login', granted: true }, 'token');
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Login granted');
+    }
+  });
+
+  test('verifyMfaToken login already verified', async () => {
+    try {
+      await verifyMfaToken({ resourceType: 'Login', mfaVerified: true }, 'token');
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Login already verified');
+    }
+  });
+
+  test('getMembershipsForLogin missing user reference', async () => {
+    try {
+      await getMembershipsForLogin({ resourceType: 'Login', user: {} });
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('User reference is missing');
+    }
+  });
+
+  test('getAuthTokens missing user', async () => {
+    try {
+      await getAuthTokens({ resourceType: 'Login', user: {} }, { reference: 'Patient/123' });
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Login missing user');
+    }
+  });
+
+  test('getAuthTokens Login missing profile', async () => {
+    try {
+      await getAuthTokens({ resourceType: 'Login', user: { reference: 'User/123' } }, { reference: 'Patient/123' });
+      fail('Expected error');
+    } catch (err) {
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.issue?.[0]?.details?.text).toEqual('Login missing profile');
+    }
+  });
+
+  test('CLI client', async () => {
+    const client = await getClient('medplum-cli');
+    expect(client).toBeDefined();
+    expect(client?.id).toEqual('medplum-cli');
+  });
 });
+
+function fail(message: string): never {
+  throw new Error(message);
+}

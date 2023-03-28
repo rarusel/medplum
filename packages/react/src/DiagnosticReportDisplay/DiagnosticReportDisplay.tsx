@@ -1,16 +1,21 @@
-import { createStyles, Group, Stack, Text, Title } from '@mantine/core';
+import { createStyles, Group, List, Stack, Text, Title } from '@mantine/core';
 import { capitalize, formatDateTime, formatObservationValue } from '@medplum/core';
 import {
+  Annotation,
   DiagnosticReport,
   Observation,
   ObservationComponent,
   ObservationReferenceRange,
   Reference,
+  Specimen,
 } from '@medplum/fhirtypes';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { CodeableConceptDisplay } from '../CodeableConceptDisplay/CodeableConceptDisplay';
 import { MedplumLink } from '../MedplumLink/MedplumLink';
+import { useMedplum } from '../MedplumProvider/MedplumProvider';
+import { NoteDisplay } from '../NoteDisplay/NoteDisplay';
 import { RangeDisplay } from '../RangeDisplay/RangeDisplay';
+import { ReferenceDisplay } from '../ReferenceDisplay/ReferenceDisplay';
 import { ResourceBadge } from '../ResourceBadge/ResourceBadge';
 import { StatusBadge } from '../StatusBadge/StatusBadge';
 import { useResource } from '../useResource/useResource';
@@ -36,85 +41,154 @@ const useStyles = createStyles((theme) => ({
       border: `0.1px solid ${theme.colors.red[5]}`,
     },
   },
+
+  noteBody: { fontSize: theme.fontSizes.sm },
+  noteCite: { fontSize: theme.fontSizes.xs, marginBlockStart: 3 },
+  noteRoot: { padding: 5 },
 }));
 
 export interface DiagnosticReportDisplayProps {
   value?: DiagnosticReport | Reference<DiagnosticReport>;
+  hideObservationNotes?: boolean;
+  hideSpecimenInfo?: boolean;
 }
 
+DiagnosticReportDisplay.defaultProps = {
+  hideObservationNotes: false,
+  hideSpecimenInfo: false,
+} as DiagnosticReportDisplayProps;
+
 export function DiagnosticReportDisplay(props: DiagnosticReportDisplayProps): JSX.Element | null {
+  const medplum = useMedplum();
   const diagnosticReport = useResource(props.value);
-  const specimen = useResource(diagnosticReport?.specimen?.[0]);
+  const [specimens, setSpecimens] = useState<Specimen[]>();
+
+  useEffect(() => {
+    if (diagnosticReport?.specimen) {
+      Promise.allSettled(diagnosticReport.specimen.map((ref) => medplum.readReference(ref)))
+        .then((outcomes) =>
+          outcomes
+            .filter((outcome) => outcome.status === 'fulfilled')
+            .map((outcome) => (outcome as PromiseFulfilledResult<Specimen>).value)
+        )
+        .then(setSpecimens)
+        .catch(console.error);
+    }
+  }, [medplum, diagnosticReport]);
 
   if (!diagnosticReport) {
     return null;
   }
 
-  let textContent = '';
+  const specimenNotes: Annotation[] = specimens?.flatMap((spec) => spec.note || []) || [];
 
   if (diagnosticReport.presentedForm && diagnosticReport.presentedForm.length > 0) {
     const pf = diagnosticReport.presentedForm[0];
     if (pf.contentType?.startsWith('text/plain') && pf.data) {
-      textContent = window.atob(pf.data);
-    }
-  }
-
-  if (specimen?.note) {
-    for (const note of specimen.note) {
-      textContent += note.text + '\n\n';
+      specimenNotes.push({ text: window.atob(pf.data) });
     }
   }
 
   return (
     <Stack>
       <Title>Diagnostic Report</Title>
-      <Group mt="md" spacing={30}>
-        {diagnosticReport.subject && (
-          <div>
+      <DiagnosticReportHeader value={diagnosticReport} />
+      {!props.hideSpecimenInfo && SpecimenInfo(specimens)}
+      {diagnosticReport.result && (
+        <ObservationTable hideObservationNotes={props.hideObservationNotes} value={diagnosticReport.result} />
+      )}
+      {specimenNotes.length > 0 && <NoteDisplay value={specimenNotes} />}
+    </Stack>
+  );
+}
+
+interface DiagnosticReportHeaderProps {
+  value: DiagnosticReport;
+}
+
+function DiagnosticReportHeader({ value }: DiagnosticReportHeaderProps): JSX.Element {
+  return (
+    <Group mt="md" spacing={30}>
+      {value.subject && (
+        <div>
+          <Text size="xs" transform="uppercase" color="dimmed">
+            Subject
+          </Text>
+          <Text>
+            <ResourceBadge value={value.subject} link={true} />
+          </Text>
+        </div>
+      )}
+      {value.resultsInterpreter &&
+        value.resultsInterpreter.map((interpreter) => (
+          <div key={interpreter.reference}>
             <Text size="xs" transform="uppercase" color="dimmed">
-              Subject
+              Interpreter
             </Text>
             <Text>
-              <ResourceBadge value={diagnosticReport.subject} link={true} />
+              <ResourceBadge value={interpreter} link={true} />
             </Text>
           </div>
-        )}
-        {diagnosticReport.resultsInterpreter &&
-          diagnosticReport.resultsInterpreter.map((interpreter) => (
-            <div key={interpreter.reference}>
-              <Text size="xs" transform="uppercase" color="dimmed">
-                Interpreter
-              </Text>
-              <Text>
-                <ResourceBadge value={interpreter} link={true} />
-              </Text>
-            </div>
-          ))}
-        {diagnosticReport.issued && (
-          <div>
+        ))}
+      {value.performer &&
+        value.performer.map((performer) => (
+          <div key={performer.reference}>
             <Text size="xs" transform="uppercase" color="dimmed">
-              Issued
+              Performer
             </Text>
-            <Text>{formatDateTime(diagnosticReport.issued)}</Text>
-          </div>
-        )}
-        {diagnosticReport.status && (
-          <div>
-            <Text size="xs" transform="uppercase" color="dimmed">
-              Status
+            <Text>
+              <ResourceBadge value={performer} link={true} />
             </Text>
-            <Text>{capitalize(diagnosticReport.status)}</Text>
           </div>
-        )}
-      </Group>
-      {diagnosticReport.result && <ObservationTable value={diagnosticReport.result} />}
-      {textContent && <pre>{textContent.trim()}</pre>}
+        ))}
+      {value.issued && (
+        <div>
+          <Text size="xs" transform="uppercase" color="dimmed">
+            Issued
+          </Text>
+          <Text>{formatDateTime(value.issued)}</Text>
+        </div>
+      )}
+      {value.status && (
+        <div>
+          <Text size="xs" transform="uppercase" color="dimmed">
+            Status
+          </Text>
+          <Text>{capitalize(value.status)}</Text>
+        </div>
+      )}
+    </Group>
+  );
+}
+
+function SpecimenInfo(specimens: Specimen[] | undefined): JSX.Element {
+  return (
+    <Stack spacing={'xs'}>
+      <Title order={2} size="h6">
+        Specimens
+      </Title>
+
+      <List type="ordered">
+        {specimens?.map((specimen, index) => (
+          <List.Item ml={'sm'} key={`specimen-${specimen.id}-${index}`}>
+            <Group spacing={20}>
+              <Group spacing={5}>
+                <Text fw={500}>Collected:</Text> {formatDateTime(specimen.collection?.collectedDateTime)}
+              </Group>
+              <Group spacing={5}>
+                <Text fw={500}>Received:</Text> {formatDateTime(specimen.receivedTime)}
+              </Group>
+            </Group>
+          </List.Item>
+        ))}
+      </List>
     </Stack>
   );
 }
 
 export interface ObservationTableProps {
   value?: Observation[] | Reference<Observation>[];
+  hideObservationNotes?: boolean;
 }
 
 export function ObservationTable(props: ObservationTableProps): JSX.Element {
@@ -128,12 +202,17 @@ export function ObservationTable(props: ObservationTableProps): JSX.Element {
           <th>Reference Range</th>
           <th>Interpretation</th>
           <th>Category</th>
+          <th>Performer</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
         {props.value?.map((observation, index) => (
-          <ObservationRow key={'obs-' + index} value={observation} />
+          <ObservationRow
+            key={`obs-${observation.id}-${index}`}
+            hideObservationNotes={props.hideObservationNotes}
+            value={observation}
+          />
         ))}
       </tbody>
     </table>
@@ -142,48 +221,65 @@ export function ObservationTable(props: ObservationTableProps): JSX.Element {
 
 interface ObservationRowProps {
   value: Observation | Reference<Observation>;
+  hideObservationNotes?: boolean;
 }
 
 function ObservationRow(props: ObservationRowProps): JSX.Element | null {
   const { classes, cx } = useStyles();
   const observation = useResource(props.value);
+
   if (!observation) {
     return null;
   }
+  const displayNotes = !props.hideObservationNotes && observation?.note;
 
   const critical = isCritical(observation);
 
   return (
-    <tr className={cx({ [classes.criticalRow]: critical })}>
-      <td>
-        <MedplumLink to={observation}>
-          <CodeableConceptDisplay value={observation.code} />
-        </MedplumLink>
-      </td>
-      <td>
-        <ObservationValueDisplay value={observation} />
-      </td>
-      <td>
-        <ReferenceRangeDisplay value={observation.referenceRange} />
-      </td>
-      <td>
-        {observation.interpretation && observation.interpretation.length > 0 && (
-          <CodeableConceptDisplay value={observation.interpretation[0]} />
-        )}
-      </td>
-      <td>
-        {observation.category && observation.category.length > 0 && (
-          <ul>
-            {observation.category.map((concept, index) => (
-              <li key={`category-${index}`}>
-                <CodeableConceptDisplay value={concept} />
-              </li>
-            ))}
-          </ul>
-        )}
-      </td>
-      <td>{observation.status && <StatusBadge status={observation.status} />}</td>
-    </tr>
+    <>
+      <tr className={cx({ [classes.criticalRow]: critical })}>
+        <td rowSpan={displayNotes ? 2 : 1}>
+          <MedplumLink to={observation}>
+            <CodeableConceptDisplay value={observation.code} />
+          </MedplumLink>
+        </td>
+        <td>
+          <ObservationValueDisplay value={observation} />
+        </td>
+        <td>
+          <ReferenceRangeDisplay value={observation.referenceRange} />
+        </td>
+        <td>
+          {observation.interpretation && observation.interpretation.length > 0 && (
+            <CodeableConceptDisplay value={observation.interpretation[0]} />
+          )}
+        </td>
+        <td>
+          {observation.category && observation.category.length > 0 && (
+            <ul>
+              {observation.category.map((concept, index) => (
+                <li key={`category-${index}`}>
+                  <CodeableConceptDisplay value={concept} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </td>
+        <td>
+          {observation.performer?.map((performer) => (
+            <ReferenceDisplay key={performer?.reference} value={performer} />
+          ))}
+        </td>
+        <td>{observation.status && <StatusBadge status={observation.status} />}</td>
+      </tr>
+      {displayNotes && (
+        <tr>
+          <td colSpan={6}>
+            <NoteDisplay value={observation.note} />
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

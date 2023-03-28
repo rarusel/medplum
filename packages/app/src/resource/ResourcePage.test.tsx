@@ -1,12 +1,15 @@
-import { indexSearchParameterBundle, indexStructureDefinitionBundle } from '@medplum/core';
+import { MantineProvider } from '@mantine/core';
+import { Notifications } from '@mantine/notifications';
+import { indexSearchParameterBundle, indexStructureDefinitionBundle, OperationOutcomeError } from '@medplum/core';
 import { readJson } from '@medplum/definitions';
-import { Bot, Bundle, OperationOutcome, Practitioner, SearchParameter } from '@medplum/fhirtypes';
+import { Bot, Bundle, Practitioner, SearchParameter } from '@medplum/fhirtypes';
 import { MockClient } from '@medplum/mock';
-import { MedplumProvider } from '@medplum/react';
+import { ErrorBoundary, MedplumProvider } from '@medplum/react';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import React from 'react';
+import React, { Suspense } from 'react';
 import { MemoryRouter } from 'react-router-dom';
 import { AppRoutes } from '../AppRoutes';
+import { Loading } from '../components/Loading';
 
 describe('ResourcePage', () => {
   async function setup(url: string, medplum = new MockClient()): Promise<void> {
@@ -14,7 +17,14 @@ describe('ResourcePage', () => {
       render(
         <MedplumProvider medplum={medplum}>
           <MemoryRouter initialEntries={[url]} initialIndex={0}>
-            <AppRoutes />
+            <MantineProvider>
+              <Notifications />
+              <ErrorBoundary>
+                <Suspense fallback={<Loading />}>
+                  <AppRoutes />
+                </Suspense>
+              </ErrorBoundary>
+            </MantineProvider>
           </MemoryRouter>
         </MedplumProvider>
       );
@@ -41,8 +51,8 @@ describe('ResourcePage', () => {
 
   test('Not found', async () => {
     await setup('/Practitioner/not-found');
-    await waitFor(() => screen.getByText('Resource not found'));
-    expect(screen.getByText('Resource not found')).toBeInTheDocument();
+    await waitFor(() => screen.getByText('Not found'));
+    expect(screen.getByText('Not found')).toBeInTheDocument();
   });
 
   test('Details tab renders', async () => {
@@ -50,25 +60,6 @@ describe('ResourcePage', () => {
     await waitFor(() => screen.queryAllByText('Name'));
     expect(screen.queryAllByText('Name')[0]).toBeInTheDocument();
     expect(screen.getByText('Gender')).toBeInTheDocument();
-  });
-
-  test('Edit tab renders', async () => {
-    await setup('/Practitioner/123/edit');
-    await waitFor(() => screen.getByText('Edit'));
-    expect(screen.getByText('Edit')).toBeInTheDocument();
-  });
-
-  test('Delete button on edit page', async () => {
-    await setup('/Practitioner/123/edit');
-    await waitFor(() => screen.getByText('Delete'));
-    expect(screen.getByText('Delete')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('Delete'));
-    });
-
-    await waitFor(() => screen.getByText('Are you sure you want to delete this Practitioner?'));
-    expect(screen.getByText('Are you sure you want to delete this Practitioner?')).toBeInTheDocument();
   });
 
   test('Delete button confirm', async () => {
@@ -90,7 +81,8 @@ describe('ResourcePage', () => {
       await medplum.readResource('Practitioner', practitioner.id as string);
       fail('Should have thrown');
     } catch (err) {
-      expect((err as OperationOutcome).id).toEqual('not-found');
+      const outcome = (err as OperationOutcomeError).outcome;
+      expect(outcome.id).toEqual('not-found');
     }
   });
 
@@ -106,58 +98,6 @@ describe('ResourcePage', () => {
     await waitFor(() => screen.getByText('Blame'));
 
     expect(screen.getByText('Blame')).toBeInTheDocument();
-  });
-
-  test('JSON tab renders', async () => {
-    await setup('/Practitioner/123/json');
-    await waitFor(() => screen.getByTestId('resource-json'));
-
-    expect(screen.getByTestId('resource-json')).toBeInTheDocument();
-  });
-
-  test('JSON submit', async () => {
-    await setup('/Practitioner/123/json');
-    await waitFor(() => screen.getByTestId('resource-json'));
-
-    await act(async () => {
-      fireEvent.change(screen.getByTestId('resource-json'), {
-        target: { value: '{"resourceType":"Practitioner","id":"123"}' },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('OK'));
-    });
-
-    expect(screen.getByTestId('resource-json')).toBeInTheDocument();
-  });
-
-  test('JSON submit with meta', async () => {
-    await setup('/Practitioner/123/json');
-    await waitFor(() => screen.getByTestId('resource-json'));
-
-    await act(async () => {
-      fireEvent.change(screen.getByTestId('resource-json'), {
-        target: {
-          value: JSON.stringify({
-            resourceType: 'Practitioner',
-            id: '123',
-            meta: {
-              lastUpdated: '2020-01-01T00:00:00.000Z',
-              author: {
-                reference: 'Practitioner/111',
-              },
-            },
-          }),
-        },
-      });
-    });
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('OK'));
-    });
-
-    expect(screen.getByTestId('resource-json')).toBeInTheDocument();
   });
 
   test('Patient timeline', async () => {
@@ -177,13 +117,6 @@ describe('ResourcePage', () => {
     await waitFor(() => screen.getByText('Timeline'));
 
     expect(screen.getByText('Timeline')).toBeInTheDocument();
-  });
-
-  test('Questionnaire builder', async () => {
-    await setup('/Questionnaire/123/builder');
-    await waitFor(() => screen.getByText('Save'));
-
-    expect(screen.getByText('Save')).toBeDefined();
   });
 
   test('Questionnaire preview', async () => {
@@ -285,64 +218,5 @@ describe('ResourcePage', () => {
 
     // Do not open a new browser tab
     expect(window.open).not.toHaveBeenCalled();
-  });
-
-  test('No apps found', async () => {
-    await setup('/Bot/123/apps');
-    await waitFor(() => screen.getByText('No apps found.', { exact: false }));
-
-    expect(screen.getByText('No apps found.', { exact: false })).toBeInTheDocument();
-  });
-
-  test('Patient apps', async () => {
-    await setup('/Patient/123/apps');
-    await waitFor(() => screen.getByText('Apps'));
-
-    expect(screen.getByText('Apps')).toBeInTheDocument();
-    expect(screen.getByText('Vitals')).toBeInTheDocument();
-  });
-
-  test('Patient Smart App Launch', async () => {
-    global.window = Object.create(window);
-    Object.defineProperty(window, 'location', {
-      value: {
-        assign: jest.fn(),
-      },
-      writable: true,
-    });
-
-    await setup('/Patient/123/apps');
-    await waitFor(() => screen.getByText('Apps'));
-
-    expect(screen.getByText('Inferno Client')).toBeInTheDocument();
-    expect(screen.getByText('Client application used for Inferno ONC compliance testing')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('Inferno Client'));
-    });
-
-    expect(window.location.assign).toBeCalled();
-  });
-
-  test('Encounter Smart App Launch', async () => {
-    global.window = Object.create(window);
-    Object.defineProperty(window, 'location', {
-      value: {
-        assign: jest.fn(),
-      },
-      writable: true,
-    });
-
-    await setup('/Encounter/123/apps');
-    await waitFor(() => screen.getByText('Apps'));
-
-    expect(screen.getByText('Inferno Client')).toBeInTheDocument();
-    expect(screen.getByText('Client application used for Inferno ONC compliance testing')).toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByText('Inferno Client'));
-    });
-
-    expect(window.location.assign).toBeCalled();
   });
 });

@@ -1,8 +1,19 @@
-import { createReference } from '@medplum/core';
-import { Bundle, ClientApplication, Login, Project, ProjectMembership, Resource } from '@medplum/fhirtypes';
+import { createReference, getReferenceString, ProfileResource } from '@medplum/core';
+import {
+  AccessPolicy,
+  Bundle,
+  ClientApplication,
+  Login,
+  Project,
+  ProjectMembership,
+  Resource,
+  User,
+} from '@medplum/fhirtypes';
 import { randomUUID } from 'crypto';
+import { inviteUser } from './admin/invite';
 import { systemRepo } from './fhir/repo';
 import { generateAccessToken } from './oauth/keys';
+import { tryLogin } from './oauth/utils';
 
 export async function createTestProject(options?: Partial<Project>): Promise<{
   project: Project;
@@ -64,6 +75,7 @@ export async function initTestAuth(options?: Partial<Project>): Promise<string> 
     client: createReference(client),
     membership: createReference(membership),
     authTime: new Date().toISOString(),
+    superAdmin: options?.superAdmin,
     scope,
   });
 
@@ -75,6 +87,50 @@ export async function initTestAuth(options?: Partial<Project>): Promise<string> 
     profile: client.resourceType + '/' + client.id,
     scope,
   });
+}
+
+export async function addTestUser(
+  project: Project,
+  accessPolicy?: AccessPolicy
+): Promise<{ user: User; profile: ProfileResource; accessToken: string }> {
+  if (accessPolicy) {
+    accessPolicy = await systemRepo.createResource<AccessPolicy>({
+      ...accessPolicy,
+      meta: { project: project.id },
+    });
+  }
+
+  const email = randomUUID() + '@example.com';
+  const password = randomUUID();
+  const { user, profile } = await inviteUser({
+    project,
+    email,
+    password,
+    resourceType: 'Patient',
+    firstName: 'Bob',
+    lastName: 'Jones',
+    accessPolicy: accessPolicy && createReference(accessPolicy),
+    sendEmail: false,
+  });
+
+  const login = await tryLogin({
+    authMethod: 'password',
+    email,
+    password,
+    scope: 'openid',
+    nonce: 'nonce',
+    remember: false,
+  });
+
+  const accessToken = await generateAccessToken({
+    login_id: login.id as string,
+    sub: user.id,
+    username: user.id as string,
+    scope: login.scope as string,
+    profile: getReferenceString(profile),
+  });
+
+  return { user, profile, accessToken };
 }
 
 /**

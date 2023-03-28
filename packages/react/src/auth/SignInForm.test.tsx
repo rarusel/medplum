@@ -1,5 +1,5 @@
 import { Title } from '@mantine/core';
-import { GoogleCredentialResponse, MedplumClient } from '@medplum/core';
+import { allOk, badRequest, GoogleCredentialResponse, MedplumClient } from '@medplum/core';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import crypto from 'crypto';
 import React from 'react';
@@ -12,7 +12,18 @@ function mockFetch(url: string, options: any): Promise<any> {
   let status = 404;
   let result: any;
 
-  if (options.method === 'POST' && url.endsWith('/auth/login')) {
+  if (options.method === 'POST' && url.endsWith('/auth/method')) {
+    const { email } = JSON.parse(options.body);
+    status = 200;
+    if (email === 'alice@external.example.com') {
+      result = {
+        authorizeUrl: 'https://external.example.com/authorize',
+        domain: 'external.example.com',
+      };
+    } else {
+      result = {};
+    }
+  } else if (options.method === 'POST' && url.endsWith('/auth/login')) {
     const { email, password } = JSON.parse(options.body);
     if (email === 'admin@example.com' && password === 'admin') {
       status = 200;
@@ -79,7 +90,19 @@ function mockFetch(url: string, options: any): Promise<any> {
       login: '1',
       code: '1',
     };
-  } else if (options.method === 'POST' && (url.endsWith('auth/profile') || url.endsWith('auth/scope'))) {
+  } else if (options.method === 'POST' && url.endsWith('auth/profile')) {
+    const { profile } = JSON.parse(options.body);
+    if (profile === '101') {
+      status = 400;
+      result = badRequest('Invalid IP address');
+    } else {
+      status = 200;
+      result = {
+        login: '1',
+        code: '1',
+      };
+    }
+  } else if (options.method === 'POST' && url.endsWith('auth/scope')) {
     status = 200;
     result = {
       login: '1',
@@ -112,6 +135,9 @@ function mockFetch(url: string, options: any): Promise<any> {
         name: [{ given: ['Medplum'], family: ['Admin'] }],
       },
     };
+  } else if (url.endsWith('/oauth2/logout')) {
+    status = 200;
+    result = allOk;
   } else {
     console.log(options.method, url);
   }
@@ -139,7 +165,7 @@ const medplum = new MedplumClient({
 });
 
 async function setup(args?: SignInFormProps): Promise<void> {
-  medplum.signOut();
+  await medplum.signOut();
 
   const props = {
     onSuccess: jest.fn(),
@@ -172,8 +198,8 @@ describe('SignInForm', () => {
 
   test('Renders', async () => {
     await setup();
-    const input = screen.getByText('Sign in') as HTMLButtonElement;
-    expect(input.innerHTML).toBe('Sign in');
+    const input = screen.getByText('Sign in to Medplum') as HTMLButtonElement;
+    expect(input.innerHTML).toBe('Sign in to Medplum');
   });
 
   test('Submit success', async () => {
@@ -187,6 +213,10 @@ describe('SignInForm', () => {
       fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
         target: { value: 'admin@example.com' },
       });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
     });
 
     await act(async () => {
@@ -218,6 +248,10 @@ describe('SignInForm', () => {
     });
 
     await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
       fireEvent.change(screen.getByLabelText('Password', { exact: false }), {
         target: { value: 'admin' },
       });
@@ -239,6 +273,10 @@ describe('SignInForm', () => {
       fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
         target: { value: 'admin@example.com' },
       });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
     });
 
     await act(async () => {
@@ -270,6 +308,10 @@ describe('SignInForm', () => {
     });
 
     await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
       fireEvent.change(screen.getByLabelText('Password', { exact: false }), {
         target: { value: 'admin' },
       });
@@ -292,6 +334,46 @@ describe('SignInForm', () => {
     expect(success).toBe(true);
   });
 
+  test('Multiple profiles invalid IP address', async () => {
+    let success = false;
+
+    await setup({
+      onSuccess: () => (success = true),
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
+        target: { value: 'multiple@medplum.com' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Password', { exact: false }), {
+        target: { value: 'admin' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Sign in'));
+    });
+
+    await waitFor(() => expect(screen.getByText('Choose profile')).toBeDefined());
+    expect(screen.getByText('Alice Smith')).toBeInTheDocument();
+    expect(screen.getByText('Bob Jones')).toBeInTheDocument();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Bob Jones'));
+    });
+
+    await waitFor(() => screen.getByText('Invalid IP address'));
+
+    expect(success).toBe(false);
+  });
+
   test('Choose scope', async () => {
     let success = false;
 
@@ -305,6 +387,10 @@ describe('SignInForm', () => {
       fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
         target: { value: 'admin@example.com' },
       });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
     });
 
     await act(async () => {
@@ -343,6 +429,10 @@ describe('SignInForm', () => {
     });
 
     await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
       fireEvent.change(screen.getByLabelText('Password', { exact: false }), { target: { value: 'newproject' } });
     });
 
@@ -373,6 +463,10 @@ describe('SignInForm', () => {
     });
 
     await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
       fireEvent.change(screen.getByLabelText('Password', { exact: false }), {
         target: { value: 'admin' },
       });
@@ -395,6 +489,10 @@ describe('SignInForm', () => {
       fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
         target: { value: 'not-found@example.com' },
       });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
     });
 
     await act(async () => {
@@ -422,6 +520,16 @@ describe('SignInForm', () => {
     await setup(props);
 
     await act(async () => {
+      fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
+        target: { value: 'forgot@example.com' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await act(async () => {
       fireEvent.click(screen.getByText('Forgot password'));
     });
 
@@ -441,6 +549,34 @@ describe('SignInForm', () => {
     });
 
     expect(props.onRegister).toBeCalled();
+  });
+
+  test('Disable Google auth', async () => {
+    const google = {
+      accounts: {
+        id: {
+          initialize: jest.fn(),
+          renderButton: jest.fn(),
+        },
+      },
+    };
+
+    (window as any).google = google;
+
+    const onSuccess = jest.fn();
+
+    await act(async () => {
+      await setup({
+        onSuccess,
+        disableGoogleAuth: true,
+        googleClientId: '123',
+      });
+    });
+
+    await waitFor(() => screen.getByLabelText('Email', { exact: false }));
+    expect(screen.queryByText('Sign in with Google')).toBeNull();
+    expect(google.accounts.id.initialize).not.toHaveBeenCalled();
+    expect(google.accounts.id.renderButton).not.toHaveBeenCalled();
   });
 
   test('Google success', async () => {
@@ -494,5 +630,40 @@ describe('SignInForm', () => {
     expect(google.accounts.id.initialize).toHaveBeenCalled();
     expect(google.accounts.id.renderButton).toHaveBeenCalled();
     expect(google.accounts.id.prompt).toHaveBeenCalled();
+  });
+
+  test('Redirect to external auth', async () => {
+    Object.defineProperty(window, 'sessionStorage', {
+      value: {
+        getItem: function (key: string): string {
+          return this[key];
+        },
+        setItem: function (key: string, value: string): void {
+          this[key] = value;
+        },
+      },
+      writable: true,
+    });
+    Object.defineProperty(window, 'location', {
+      value: {
+        assign: jest.fn(),
+      },
+      writable: true,
+    });
+
+    await setup({});
+
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('Email', { exact: false }), {
+        target: { value: 'alice@external.example.com' },
+      });
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText('Next'));
+    });
+
+    await waitFor(() => expect(window.location.assign).toBeCalled());
+    expect(window.location.assign).toBeCalled();
   });
 });
