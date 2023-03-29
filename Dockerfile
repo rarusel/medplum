@@ -15,5 +15,6 @@ ENV NODE_ENV production
 WORKDIR /usr/src/medplum
 COPY ./ ./
 RUN npm ci
+# RUN npm run build # fails bc. 'turbo' is not found
 EXPOSE 5000 8103
 ENTRYPOINT [ "node", "packages/server/dist/index.js" ]

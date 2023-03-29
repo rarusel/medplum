@@ -15,7 +15,6 @@ import { logger } from '../logger';
  * @param options The MailComposer options.
  */
 export async function sendEmail(options: Mail.Options): Promise<void> {
-  const sesClient = new SESv2Client({ region: getConfig().awsRegion });
   const fromAddress = getConfig().supportEmail;
   const toAddresses = buildAddresses(options.to);
   const ccAddresses = buildAddresses(options.cc);
@@ -44,7 +43,7 @@ export async function sendEmail(options: Mail.Options): Promise<void> {
     await client.sendMail(options_with_rewritten_attachments);
   } 
   else {
-    const sesClient = new SESv2Client({ region: 'us-east-1' });
+    const sesClient = new SESv2Client({ region: getConfig().awsRegion });
     const msg = await buildRawMessage(options_with_rewritten_attachments);
   await sesClient.send(
     new SendEmailCommand({

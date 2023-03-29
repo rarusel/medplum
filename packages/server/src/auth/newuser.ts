@@ -55,6 +55,7 @@ export async function newUserHandler(req: Request, res: Response): Promise<void>
         return;
       }
     }
+  }
 
   if (secretKey) {
     if (!req.body.recaptchaToken) {

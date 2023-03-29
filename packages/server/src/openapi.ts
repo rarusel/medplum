@@ -167,6 +167,9 @@ function buildTags(result: OpenAPIObject, typeName: string, typeDefinition: JSON
  * @param result The OpenAPI specification output.
  */
 function buildPaths(result: OpenAPIObject): void {
+  if (!result.paths) {
+    result.paths = {};
+  }
   result.paths[`/fhir/R4/{resourceType}`] = {
     get: buildSearchPath(),
     post: buildCreatePath(),

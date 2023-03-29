@@ -13,8 +13,8 @@ services:
       dockerfile: ./packages/app/Dockerfile
     depends_on:
       - server
-    environment: 
-      - MEDPLUM_BASE_URL=http://${MEDPLUM_HOST}:${MEDPLUM_PORT}/
+    # environment: 
+    #   - MEDPLUM_BASE_URL
     networks:
       - medplum_network
     ports: 
